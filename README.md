@@ -72,6 +72,7 @@ cargo clippy --release        # clean
 reim process <in.wav> <out.wav>           analyze + resynthesize a mono WAV
 reim eval <ref.wav> <in.wav> [feat.csv]   compare output against a reference
 reim bench [in.wav]                       throughput + per-stage latency
+reim f0 <in.wav> [fmin] [fmax] [fftsize]  print per-frame "time,fo_hz" contour
 ```
 
 Reads PCM8/PCM16/float32 mono WAV; writes float32 mono.
@@ -135,6 +136,19 @@ not added. Likewise, the instantaneous-frequency refinement is already
 StoneMask-equivalent, and widening it (6/12 harmonics or a second pass) moved
 median error by under 0.1 cent in mixed directions -- it is saturated at 3
 harmonics, so it was left as is.
+
+On real speech the picture is more sober. Run through the independent
+[pitch-benchmark](https://github.com/lars76/pitch-benchmark) suite on its bundled
+SpeechSynth set (219 TTS clips, 65-300 Hz, 16 kHz), using that project's own
+algorithm wrappers and metrics, ReIm scores RPA 72% -- on par with WORLD's own
+DIO/Harvest (72%/72%), behind pYIN (78%) and Praat (79%), and with a higher
+gross/octave-error rate (6.0%/4.2% vs ~0.5-3%). About half that gap is the fixed
+analysis window: 2048 points is 128 ms at 16 kHz, far too long for low-pitch
+speech, and shrinking it to 1024 (64 ms) roughly halves gross/octave errors at no
+RPA cost. ReIm's defaults target 24-48 kHz real-time vocoding rather than 16 kHz
+speech pitch extraction, so this is somewhat out of its envelope; the synthetic
+tones above (where it beat YIN) were too favorable. Learned models (CREPE,
+SwiftF0, RMVPE) lead that benchmark and were not run here.
 
 ## Performance
 

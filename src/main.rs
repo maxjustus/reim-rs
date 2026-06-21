@@ -190,11 +190,37 @@ fn cmd_bench(input: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+// Emit the per-frame Fo contour as CSV: "time_seconds,fo_hz" (fo 0.0 = unvoiced).
+// time is the analysis-window center, so the contour aligns with the audio it
+// describes. fftsize is fixed at 2048 (the default).
+fn cmd_f0(input: &str, fmin: Option<&str>, fmax: Option<&str>, fftarg: Option<&str>) -> Result<(), String> {
+    let fo_floor: f64 = fmin.unwrap_or("71").parse().map_err(|_| "bad fmin")?;
+    let fo_ceil: f64 = fmax.unwrap_or("800").parse().map_err(|_| "bad fmax")?;
+    let fftsize: usize = fftarg.unwrap_or("2048").parse().map_err(|_| "bad fftsize")?;
+    let wav = read_wav(input)?;
+    let fs = wav.sample_rate as f64;
+    let mut reim = Reim::new(fs, 5.0, fftsize, fo_floor, fo_ceil);
+    let half = fftsize as f64 / 2.0;
+    let mut last = 0u64;
+    let mut out = String::new();
+    for (i, &x) in wav.samples.iter().enumerate() {
+        reim.process_sample(x);
+        if reim.frame_count() != last {
+            last = reim.frame_count();
+            let t = ((i as f64 - half) / fs).max(0.0);
+            out.push_str(&format!("{t:.6},{:.4}\n", reim.last_fo()));
+        }
+    }
+    print!("{out}");
+    Ok(())
+}
+
 fn usage() -> ! {
     eprintln!("usage:");
     eprintln!("  reim process <in.wav> <out.wav>");
     eprintln!("  reim eval <ref.wav> <in.wav> [feat.csv]");
     eprintln!("  reim bench [in.wav]");
+    eprintln!("  reim f0 <in.wav> [fmin] [fmax]");
     std::process::exit(2);
 }
 
@@ -204,6 +230,7 @@ fn main() {
         Some("process") if args.len() == 4 => cmd_process(&args[2], &args[3]),
         Some("eval") if args.len() >= 4 => cmd_eval(&args[2], &args[3], args.get(4).map(|s| s.as_str())),
         Some("bench") => cmd_bench(args.get(2).map(|s| s.as_str())),
+        Some("f0") if args.len() >= 3 => cmd_f0(&args[2], args.get(3).map(|s| s.as_str()), args.get(4).map(|s| s.as_str()), args.get(5).map(|s| s.as_str())),
         _ => usage(),
     };
     if let Err(e) = result {
