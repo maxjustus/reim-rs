@@ -500,6 +500,13 @@ fn analyze_fo_with_zerocross(x: &[f64], fs: f64) -> Option<(f64, f64)> {
     if mean_freq <= 0.0 || mean_freq > fs / 2.0 {
         return None;
     }
+    // NOTE: faithful to a variance-formula bug in the C reference -- it subtracts
+    // E[f] (mean_freq), not E[f]^2. Do NOT "fix" it: it is load-bearing. The buggy
+    // form makes the `rsd > 1.0` reject gate fire when interval-frequency variance
+    // exceeds the mean frequency (an effective periodicity filter); the correct form
+    // would only reject variance > mean^2 (~never -> gate inert, noise/rumble passes).
+    // Correcting it breaks the C-oracle match (151 -> 7 dB seg-SNR) and worsens rumble
+    // rejection, with no measured benefit, so it is reproduced verbatim.
     let std_freq = (sum_square_freq / denominator - mean_freq).sqrt();
     Some((mean_freq, std_freq / mean_freq))
 }
