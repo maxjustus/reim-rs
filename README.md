@@ -100,8 +100,8 @@ that.
 ## Pitch (Fo) accuracy
 
 The Fo tracker is DIO zero-crossing candidates over a 2-channels/octave
-filterbank, refined by instantaneous frequency and selected by a Summation of
-Residual Harmonics (SRH) score, with the previous frame's Fo seeded for
+filterbank, refined by instantaneous frequency (a StoneMask-equivalent step) and
+selected by a Summation of Residual Harmonics (SRH) score, with the previous frame's Fo seeded for
 continuity. Voicing is decided separately (in the Ap stage, via a D4C-style band
 ratio), so this stage is a pitch tracker, not a pitch+VUV detector.
 
@@ -131,7 +131,10 @@ this is "matches a standard baseline", not "beats a tuned YIN or a learned model
 like CREPE". An offline/fixed-lag Viterbi pitch-smoothing pass was also tried and
 measured no improvement over the greedy tracker on this material (the SRH score
 plus the previous-Fo seed already handle octave errors and continuity), so it was
-not added.
+not added. Likewise, the instantaneous-frequency refinement is already
+StoneMask-equivalent, and widening it (6/12 harmonics or a second pass) moved
+median error by under 0.1 cent in mixed directions -- it is saturated at 3
+harmonics, so it was left as is.
 
 ## Performance
 
