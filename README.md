@@ -97,6 +97,42 @@ synthetic 8/16/44.1 kHz signals with vibrato, noise, and silence. The remaining
 error is the f32 quantization of the reference WAV; the f64 pipelines agree below
 that.
 
+## Pitch (Fo) accuracy
+
+The Fo tracker is DIO zero-crossing candidates over a 2-channels/octave
+filterbank, refined by instantaneous frequency and selected by a Summation of
+Residual Harmonics (SRH) score, with the previous frame's Fo seeded for
+continuity. Voicing is decided separately (in the Ap stage, via a D4C-style band
+ratio), so this stage is a pitch tracker, not a pitch+VUV detector.
+
+To check accuracy (not just faithfulness to the C), it was compared against two
+classic dependency-free detectors -- YIN (de Cheveigne & Kawahara 2002) and
+normalized autocorrelation -- on the same frame grid, using synthetic signals
+with a known Fo. `gross` = error > 50 cents; `octave` = within 150 cents of an
+octave; `median` = median absolute error.
+
+| signal (known Fo)            | ReIm              | YIN               | autocorr        |
+| ---------------------------- | ----------------- | ----------------- | --------------- |
+| steady 200 Hz, ~3 dB SNR     | 0% gross / 0.8c   | 0% / 4.1c         | 0% / 3.7c       |
+| steps 160/240 Hz + noise     | 17% gross, 0% oct | 36% gross, 20% oct| 37%, 21% oct    |
+| weak fundamental 160 Hz      | 0% / 0.3c         | 0% / 0.3c         | 0% / 0.3c       |
+| vibrato 190 Hz +-5% + noise  | 0% gross / 1.8c   | 0% / 13.3c        | 0% / 15.0c      |
+
+ReIm matched or beat the YIN baseline on every case: 3-7x lower median error on
+steady/vibrato tones (the instantaneous-frequency refinement gives finer
+estimates than YIN's lag-quantized peak), and at noisy step transitions half the
+gross errors and no octave errors where YIN/autocorr flip octaves ~20% of the
+time. On the real voice file (no ground truth) ReIm and YIN agree to a median of
+8.2 cents, 85% of frames within 50 cents.
+
+Caveats: synthetic ground truth is controlled (laryngograph-referenced real
+speech would be definitive); YIN/autocorr use standard untuned thresholds, so
+this is "matches a standard baseline", not "beats a tuned YIN or a learned model
+like CREPE". An offline/fixed-lag Viterbi pitch-smoothing pass was also tried and
+measured no improvement over the greedy tracker on this material (the SRH score
+plus the previous-Fo seed already handle octave errors and continuity), so it was
+not added.
+
 ## Performance
 
 `reim bench` on the bundled voice file (24 kHz): ~14x real time, per-frame
