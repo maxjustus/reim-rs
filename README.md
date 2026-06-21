@@ -1,12 +1,13 @@
 # reim-rs
 
-A single-file Rust port of [ReIm](./reim), a real-time WORLD-like speech
-vocoder. Analyzes a mono signal into fundamental frequency (Fo), aperiodicity
-(Ap), and spectral envelope (Sp), then resynthesizes it. The analysis order is
-Silence -> Fo -> Ap -> Sp.
+A Rust port of [ReIm](./reim), a real-time WORLD-like speech vocoder. Analyzes a
+mono signal into fundamental frequency (Fo), aperiodicity (Ap), and spectral
+envelope (Sp), then resynthesizes it. The analysis order is Silence -> Fo -> Ap
+-> Sp.
 
-The entire library and CLI live in `src/main.rs` with no external dependencies;
-it builds with `cargo` or directly with `rustc -O src/main.rs`.
+The vocoder is a dependency-free library in `src/lib.rs`; `src/main.rs` is a thin
+CLI over it. Add the crate as a dependency and `use reim::Reim`, or run the
+`reim` binary directly.
 
 ## Design
 
@@ -17,6 +18,45 @@ it builds with `cargo` or directly with `rustc -O src/main.rs`.
   deviations from the C are documented in the source — the silence RMS skips a
   one-element out-of-bounds read present in the C, and the Ap range guard mirrors
   the C's exact branch semantics (including NaN handling).
+
+## Use as a library
+
+The whole API is the `Reim` type: construct it once, then push samples through
+`process_sample` (one in, one out) or `process_block`.
+
+```rust
+// Offline / block: analyze + resynthesize a buffer.
+let mut reim = Reim::with_defaults(48_000.0); // fs; period 5 ms, fftsize 2048, fo 71-800 Hz
+let mut out = vec![0.0; input.len()];
+reim.process_block(&input, &mut out);         // output slice is caller-owned; no allocation
+```
+
+Real-time: build `Reim` off the audio thread (construction allocates all working
+buffers), then call `process_sample` in the callback — it allocates nothing,
+takes no locks, and is deterministic.
+
+```rust
+// setup thread:
+let mut reim = Reim::new(
+    48_000.0, // fs
+    5.0,      // frame period (ms)
+    1024,     // fftsize (power of two): smaller = lower latency, coarser spectrum
+    71.0,     // fo_floor (Hz)
+    800.0,    // fo_ceil  (Hz)
+);
+
+// audio callback (hot path, allocation-free):
+for (out_sample, &in_sample) in output.iter_mut().zip(input) {
+    *out_sample = reim.process_sample(in_sample as f64) as f32;
+}
+```
+
+Latency note: input->output latency is dominated by `fftsize`. Its floor is the
+`fftsize/2`-sample synthesis group delay; measured end-to-end it is ≈49 ms at
+48 kHz and ≈89 ms at 24 kHz with the default `fftsize=2048`. Because it is fixed
+in samples, it falls as `fs` rises or `fftsize` shrinks — drop `fftsize` to cut
+latency at the cost of frequency resolution. Throughput keeps up at ~14x real
+time regardless (see Performance).
 
 ## Build and test
 

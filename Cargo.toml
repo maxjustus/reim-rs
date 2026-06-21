@@ -2,7 +2,11 @@
 name = "reim"
 version = "0.1.0"
 edition = "2021"
-description = "Real-time WORLD-like vocoder (single-file Rust port of ReIm)"
+description = "Real-time WORLD-like vocoder (Rust port of ReIm)"
+
+[lib]
+name = "reim"
+path = "src/lib.rs"
 
 [[bin]]
 name = "reim"
