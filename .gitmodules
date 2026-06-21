@@ -1,0 +1,3 @@
+[submodule "reim"]
+	path = reim
+	url = https://github.com/nakakq/reim.git
