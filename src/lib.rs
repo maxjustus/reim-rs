@@ -1187,6 +1187,12 @@ impl Reim {
     pub fn last_silence(&self) -> bool {
         self.last_silence
     }
+    /// Per-bin aperiodicity for the most recent frame (length `fftsize/2 + 1`):
+    /// the noise-to-total energy ratio per frequency bin, ~0 = periodic,
+    /// ~1 = fully aperiodic.
+    pub fn last_aperiodicity(&self) -> &[f64] {
+        &self.ap_buf
+    }
 }
 
 // ============================================================================

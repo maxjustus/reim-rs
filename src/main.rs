@@ -228,12 +228,34 @@ fn cmd_f0(input: &str, fmin: Option<&str>, fmax: Option<&str>, fftarg: Option<&s
     Ok(())
 }
 
+// Dump per-frame aperiodicity as raw little-endian f64: frame_count rows of
+// (fftsize/2 + 1) bins each. For comparing the analyzer against a reference.
+fn cmd_ap(input: &str, output: &str) -> Result<(), String> {
+    let wav = read_wav(input)?;
+    let mut reim = Reim::with_defaults(wav.sample_rate as f64);
+    let mut bytes = Vec::new();
+    let mut last = 0u64;
+    for &x in &wav.samples {
+        reim.process_sample(x);
+        if reim.frame_count() != last {
+            last = reim.frame_count();
+            for &a in reim.last_aperiodicity() {
+                bytes.extend_from_slice(&a.to_le_bytes());
+            }
+        }
+    }
+    std::fs::write(output, &bytes).map_err(|e| format!("write {output}: {e}"))?;
+    println!("wrote aperiodicity: {last} frames -> {output}");
+    Ok(())
+}
+
 fn usage() -> ! {
     eprintln!("usage:");
     eprintln!("  reim process <in.wav> <out.wav>");
     eprintln!("  reim eval <ref.wav> <in.wav> [feat.csv]");
     eprintln!("  reim bench [in.wav]");
     eprintln!("  reim f0 <in.wav> [fmin] [fmax] [fftsize]");
+    eprintln!("  reim ap <in.wav> <out.f64>");
     std::process::exit(2);
 }
 
@@ -244,6 +266,7 @@ fn main() {
         Some("eval") if args.len() >= 4 => cmd_eval(&args[2], &args[3], args.get(4).map(|s| s.as_str())),
         Some("bench") => cmd_bench(args.get(2).map(|s| s.as_str())),
         Some("f0") if args.len() >= 3 => cmd_f0(&args[2], args.get(3).map(|s| s.as_str()), args.get(4).map(|s| s.as_str()), args.get(5).map(|s| s.as_str())),
+        Some("ap") if args.len() == 4 => cmd_ap(&args[2], &args[3]),
         _ => usage(),
     };
     if let Err(e) = result {
