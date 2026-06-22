@@ -67,8 +67,7 @@ fn instfreq(xr1: f64, xi1: f64, xr2: f64, xi2: f64, fs: f64) -> f64 {
 /// Clamp a (floating) array position into `[0, len-1]` (CLAMP_INDEX in C).
 #[inline]
 fn clamp_index_f(x: f64, len: usize) -> f64 {
-    let hi = if len == 0 { 0.0 } else { (len - 1) as f64 };
-    x.max(0.0).min(hi)
+    x.max(0.0).min(len.saturating_sub(1) as f64)
 }
 
 /// ifftshift of the first `numbins` samples by `numbins-1` (circular by N/2).
@@ -156,7 +155,7 @@ impl Fft {
     fn new(n: usize) -> Self {
         assert!(n.is_power_of_two() && n >= 2, "fft size must be a power of two");
         let bits = n.trailing_zeros();
-        let rev = (0..n).map(|i| (i as u32).reverse_bits() >> (32 - bits)).map(|x| x as usize).collect();
+        let rev = (0..n).map(|i| ((i as u32).reverse_bits() >> (32 - bits)) as usize).collect();
         let half = n / 2;
         let mut cos = vec![0.0; half];
         let mut sin = vec![0.0; half];
@@ -452,12 +451,12 @@ fn analyze_fo_with_zerocross(x: &[f64], fs: f64) -> Option<(f64, f64)> {
     let mut sum_freq = 0.0;
     let mut sum_square_freq = 0.0;
 
-    let accumulate = |i: i64, last: i64, num: &mut f64, sf: &mut f64, ssf: &mut f64| {
+    let mut accumulate = |i: i64, last: i64| {
         let interval = (i - last) as f64;
         let freq = fs / interval;
-        *num += interval;
-        *sf += freq * interval;
-        *ssf += freq * freq * interval;
+        denominator += interval;
+        sum_freq += freq * interval;
+        sum_square_freq += freq * freq * interval;
     };
 
     let mut xprev = x[0];
@@ -468,24 +467,24 @@ fn analyze_fo_with_zerocross(x: &[f64], fs: f64) -> Option<(f64, f64)> {
         let ii = i as i64;
         if xprev < 0.0 && xcurr >= 0.0 {
             if last_positive >= 0 {
-                accumulate(ii, last_positive, &mut denominator, &mut sum_freq, &mut sum_square_freq);
+                accumulate(ii, last_positive);
             }
             last_positive = ii;
         } else if xprev > 0.0 && xcurr <= 0.0 {
             if last_negative >= 0 {
-                accumulate(ii, last_negative, &mut denominator, &mut sum_freq, &mut sum_square_freq);
+                accumulate(ii, last_negative);
             }
             last_negative = ii;
         }
         if xdiffprev < 0.0 && xdiffcurr >= 0.0 {
             if last_peak >= 0 {
-                accumulate(ii, last_peak, &mut denominator, &mut sum_freq, &mut sum_square_freq);
+                accumulate(ii, last_peak);
             }
             last_peak = ii;
         } else if xdiffprev > 0.0 && xdiffcurr <= 0.0 {
             if last_dip > 1 {
                 // NOTE: asymmetric guard (>1, not >=0) preserved from the C source.
-                accumulate(ii, last_dip, &mut denominator, &mut sum_freq, &mut sum_square_freq);
+                accumulate(ii, last_dip);
             }
             last_dip = ii;
         }
@@ -613,9 +612,8 @@ impl FoAnalyzer {
             fft.inverse(&mut self.filtered_r, &mut self.filtered_i);
 
             let offset = self.channel_offsets[ch];
-            let (fo, rsd) = match analyze_fo_with_zerocross(&self.filtered_r[offset..], fs) {
-                Some(v) => v,
-                None => continue,
+            let Some((fo, rsd)) = analyze_fo_with_zerocross(&self.filtered_r[offset..], fs) else {
+                continue;
             };
             if fo.is_nan() || fo < fo_floor || fo > fo_ceil || rsd > 1.0 {
                 continue;
@@ -711,10 +709,7 @@ impl ApAnalyzer {
             && !out_of_range
             && !low_band_dominated(input, &mut self.x_real, &mut self.x_imag, cfg.fftsize, fo, cfg.fs, fft)
             && estimate_is_voiced(input, &mut self.x_real, &mut self.x_imag, cfg.fftsize, fo, cfg.fs, fft);
-        let value = if voiced { 1e-3 } else { 1.0 };
-        for a in ap.iter_mut().take(numbins) {
-            *a = value;
-        }
+        ap[..numbins].fill(if voiced { 1e-3 } else { 1.0 });
         voiced
     }
 }
@@ -815,9 +810,7 @@ impl SpAnalyzer {
         let numbins = cfg.numbins;
 
         if issilence {
-            for s in sp.iter_mut().take(numbins) {
-                *s = 1e-12;
-            }
+            sp[..numbins].fill(1e-12);
             return;
         }
 
@@ -1024,8 +1017,7 @@ impl Synth {
 
         self.has_noise = !issilence;
         if self.has_noise {
-            let gain_noise = self.gain_noise;
-            generate_minimum_phase_spectrum(&mut self.spec_noise_r, &mut self.spec_noise_i, gain_noise, fftsize, fft);
+            generate_minimum_phase_spectrum(&mut self.spec_noise_r, &mut self.spec_noise_i, self.gain_noise, fftsize, fft);
             generate_impulse(&mut self.impulse_noise, &self.spec_noise_r, &self.spec_noise_i, 0.0, &self.window, &mut self.temp_r, &mut self.temp_i, fftsize, fft);
         }
     }

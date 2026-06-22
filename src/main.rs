@@ -16,6 +16,18 @@ fn cmd_process(input: &str, output: &str) -> Result<(), String> {
     Ok(())
 }
 
+// Signal and error energy over reference[r]/test[r], summed in order.
+fn sig_err(reference: &[f64], test: &[f64], range: std::ops::Range<usize>) -> (f64, f64) {
+    let mut sig = 0.0;
+    let mut err = 0.0;
+    for j in range {
+        sig += reference[j] * reference[j];
+        let d = reference[j] - test[j];
+        err += d * d;
+    }
+    (sig, err)
+}
+
 fn segmental_snr(reference: &[f64], test: &[f64], seg: usize) -> f64 {
     let n = reference.len().min(test.len());
     let mut total = 0.0;
@@ -23,13 +35,7 @@ fn segmental_snr(reference: &[f64], test: &[f64], seg: usize) -> f64 {
     let mut i = 0;
     while i < n {
         let end = (i + seg).min(n);
-        let mut sig = 0.0;
-        let mut err = 0.0;
-        for j in i..end {
-            sig += reference[j] * reference[j];
-            let d = reference[j] - test[j];
-            err += d * d;
-        }
+        let (sig, err) = sig_err(reference, test, i..end);
         if sig > 1e-12 {
             total += 10.0 * (sig / (err + 1e-20)).log10();
             count += 1;
@@ -45,13 +51,7 @@ fn segmental_snr(reference: &[f64], test: &[f64], seg: usize) -> f64 {
 
 fn global_snr(reference: &[f64], test: &[f64]) -> f64 {
     let n = reference.len().min(test.len());
-    let mut sig = 0.0;
-    let mut err = 0.0;
-    for j in 0..n {
-        sig += reference[j] * reference[j];
-        let d = reference[j] - test[j];
-        err += d * d;
-    }
+    let (sig, err) = sig_err(reference, test, 0..n);
     10.0 * (sig / (err + 1e-20)).log10()
 }
 
@@ -179,12 +179,11 @@ fn cmd_bench(input: Option<&str>) -> Result<(), String> {
 
     let mut lat = p.frame_latencies;
     lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let frames = lat.len().max(1) as f64;
     let q = |x: f64| lat[((lat.len() as f64 - 1.0) * x) as usize] * 1e6;
     let budget_us = p.period_ms * 1000.0;
     println!("== per-frame analysis latency ==");
     println!("  frames          : {}", lat.len());
-    println!("  mean            : {:.1} us", lat.iter().sum::<f64>() / frames * 1e6);
+    println!("  mean            : {:.1} us", lat.iter().sum::<f64>() / lat.len().max(1) as f64 * 1e6);
     println!("  p50 / p99 / max : {:.1} / {:.1} / {:.1} us", q(0.50), q(0.99), q(1.0));
     println!("  frame budget    : {:.1} us ({} ms period)  -> headroom {:.0}x", budget_us, p.period_ms, budget_us / q(1.0).max(1e-9));
     Ok(())
