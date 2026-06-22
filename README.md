@@ -14,13 +14,18 @@ CLI over it. Add the crate as a dependency and `use reim::Reim`, or run the
 - Allocation-free steady state: `Reim::process_sample` does no heap allocation;
   all working buffers are owned by the analyzer/synthesizer state and reused.
 - Self-contained: hand-written radix-2 FFT, xorshift RNG, and WAV I/O.
-- Faithful to the C reference: ported function by function and matched to the f32
-  noise floor against a C oracle. Three places deviate from the C in source while
-  keeping its output: the silence RMS skips a one-element out-of-bounds read
-  present in the C; the Ap range guard mirrors the C's exact branch semantics
-  (including NaN handling); and the Fo periodicity gate computes a real variance
-  instead of the C's std-dev formula (which has a sign error but yields the same
-  gate). All three are documented in the source.
+- Faithful to the C reference for Fo/Sp/synthesis, matched to the f32 noise floor
+  against a C oracle. Three small in-source deviations keep that output: the
+  silence RMS skips a one-element out-of-bounds read present in the C; the Ap
+  range guard mirrors the C's exact branch semantics (including NaN handling); and
+  the Fo periodicity gate computes a real variance instead of the C's std-dev
+  formula (sign error, same gate). All three are documented in the source.
+- Aperiodicity is a deliberate departure: the C reference leaves the Ap analyzer
+  unimplemented (a binary voiced/unvoiced flag), so ReIm instead computes WORLD's
+  D4C band-aperiodicity. Voiced frames get a real per-band noise/periodic split
+  (validated against WORLD's D4C to a per-frame aperiodicity MAE of ~0.004); the
+  voiced/unvoiced decision itself is unchanged. This changes the synthesized
+  waveform versus the C placeholder by design.
 
 ## Use as a library
 
@@ -96,6 +101,7 @@ reim process <in.wav> <out.wav>           analyze + resynthesize a mono WAV
 reim eval <ref.wav> <in.wav> [feat.csv]   compare output against a reference
 reim bench [in.wav]                       throughput + per-stage latency
 reim f0 <in.wav> [fmin] [fmax] [fftsize]  print per-frame "time,fo_hz" contour
+reim ap <in.wav> <out.f64>                dump per-frame aperiodicity (raw f64)
 ```
 
 Reads PCM8/PCM16/float32 mono WAV; writes float32 mono.

@@ -644,12 +644,13 @@ impl FoAnalyzer {
 }
 
 // ============================================================================
-// Aperiodicity analysis (placeholder, as in the reference: V/UV decision only).
+// Aperiodicity analysis: WORLD D4C band-aperiodicity.
 // ============================================================================
 
 struct ApAnalyzer {
     x_real: Vec<f64>,
     x_imag: Vec<f64>,
+    d4c: D4c,
 }
 
 // Reject a frame as unvoiced when its energy is concentrated BELOW the detected
@@ -706,12 +707,430 @@ fn estimate_is_voiced(input: &[f64], re: &mut [f64], im: &mut [f64], fftsize: us
     low_mid_energy / low_to_high_energy > VOICED_BAND_RATIO
 }
 
+// --- D4C constants (WORLD constantnumbers.h) --------------------------------
+const D4C_FREQUENCY_INTERVAL: f64 = 3000.0;
+const D4C_UPPER_LIMIT: f64 = 15000.0;
+const D4C_FLOOR_F0: f64 = 47.0;
+const D4C_SAFE_GUARD_MINIMUM: f64 = 1e-12;
+
+/// MATLAB-style round: truncate toward zero after a 0.5 nudge away from zero.
+/// Differs from Rust's `f64::round` on exact half-integers of negative numbers.
+fn matlab_round(x: f64) -> i64 {
+    if x > 0.0 {
+        (x + 0.5) as i64
+    } else {
+        (x - 0.5) as i64
+    }
+}
+
+/// Nuttall window into `y` (length `y.len()`), matching common.cpp NuttallWindow.
+fn nuttall_window_into(y: &mut [f64]) {
+    let len = y.len();
+    for (i, yi) in y.iter_mut().enumerate() {
+        let t = i as f64 / (len as f64 - 1.0);
+        *yi = 0.355768 - 0.487396 * (2.0 * REIM_PI * t).cos()
+            + 0.144232 * (4.0 * REIM_PI * t).cos()
+            - 0.012604 * (6.0 * REIM_PI * t).cos();
+    }
+}
+
+/// interp1Q: piecewise-linear resample of `y` (sampled at `origin + i*shift`)
+/// onto query points `xi`, into `yi`. Port of matlabfunctions.cpp interp1Q.
+fn interp1q(origin: f64, shift: f64, y: &[f64], xi: &[f64], yi: &mut [f64]) {
+    let last = y.len() - 1;
+    for (i, &q) in xi.iter().enumerate() {
+        let pos = (q - origin) / shift;
+        let base = pos as usize; // truncation toward zero; pos >= 0 in all D4C uses
+        let frac = pos - base as f64;
+        let delta = if base >= last { 0.0 } else { y[base + 1] - y[base] };
+        yi[i] = y[base] + delta * frac;
+    }
+}
+
+/// Piecewise-linear interpolation of `(x, y)` onto query points `xi`, into `yi`,
+/// with MATLAB interp1 semantics (histc bucketing). `x` strictly increasing.
+/// Port of matlabfunctions.cpp interp1 + histc; `k` is scratch of len `xi.len()`.
+fn interp1(x: &[f64], y: &[f64], xi: &[f64], k: &mut [usize], yi: &mut [f64]) {
+    let x_length = x.len();
+    let xi_length = xi.len();
+    let mut count = 1usize;
+    let mut i = 0usize;
+    while i < xi_length {
+        k[i] = 1;
+        if x[0] <= xi[i] {
+            break;
+        }
+        i += 1;
+    }
+    while i < xi_length {
+        if xi[i] < x[count] {
+            k[i] = count;
+        } else {
+            // WORLD advances `count` but re-examines this same `i` (its `index[i--] = count++`
+            // cancels the loop's `++i`); reproduce by assigning and not advancing `i`.
+            k[i] = count;
+            count += 1;
+            if count == x_length {
+                break;
+            }
+            continue;
+        }
+        if count == x_length {
+            break;
+        }
+        i += 1;
+    }
+    count -= 1;
+    i += 1;
+    while i < xi_length {
+        k[i] = count;
+        i += 1;
+    }
+    for i in 0..xi_length {
+        let ki = k[i];
+        let h = x[ki] - x[ki - 1];
+        let s = (xi[i] - x[ki - 1]) / h;
+        yi[i] = y[ki - 1] + s * (y[ki] - y[ki - 1]);
+    }
+}
+
+/// GetWindowedWaveform (d4c.cpp): place an F0-adaptive window (Hanning or
+/// Blackman) at `center`, weight-correct, into `waveform[0..fft_size]`
+/// (zero-padded past the window). The matching window samples are written to
+/// `window`. SKIPS the +randn*1e-6 dither (negligible; the #1 bit-match risk).
+fn get_windowed_waveform(x: &[f64], fs: f64, current_f0: f64, center: usize, blackman: bool, window_length_ratio: f64, waveform: &mut [f64], window: &mut [f64]) {
+    let half_window_length = matlab_round(window_length_ratio * fs / current_f0 / 2.0);
+    let span = (half_window_length * 2 + 1) as usize;
+    let x_last = x.len() as i64 - 1;
+    let origin = center as i64; // WORLD: round(current_position*fs + 0.001) == center
+    for j in 0..span {
+        let base = j as i64 - half_window_length;
+        let arg = REIM_PI * (2.0 * base as f64 / window_length_ratio / fs) * current_f0;
+        window[j] = if blackman {
+            0.42 + 0.5 * arg.cos() + 0.08 * (2.0 * arg).cos()
+        } else {
+            0.5 * arg.cos() + 0.5
+        };
+        let safe = (origin + base).clamp(0, x_last) as usize;
+        waveform[j] = x[safe] * window[j];
+    }
+    let mut tmp_weight1 = 0.0;
+    let mut tmp_weight2 = 0.0;
+    for j in 0..span {
+        tmp_weight1 += waveform[j];
+        tmp_weight2 += window[j];
+    }
+    let weighting_coefficient = tmp_weight1 / tmp_weight2;
+    for j in 0..span {
+        waveform[j] -= window[j] * weighting_coefficient;
+    }
+    for w in waveform[span..].iter_mut() {
+        *w = 0.0;
+    }
+}
+
+/// DCCorrection (common.cpp): add a low-frequency replica of `buf` to itself,
+/// in place over the first `upper_limit-1` bins. `axis`/`replica` are scratch.
+fn dc_correction(buf: &mut [f64], f0: f64, fs: f64, fft_size: usize, axis: &mut [f64], replica: &mut [f64]) {
+    let upper_limit = 2 + (f0 * fft_size as f64 / fs) as usize;
+    let axis = &mut axis[..upper_limit];
+    for (i, a) in axis.iter_mut().enumerate() {
+        *a = i as f64 * fs / fft_size as f64;
+    }
+    let replica = &mut replica[..upper_limit - 1];
+    // WORLD queries only the first upper_limit-1 axis points (the array is one longer).
+    interp1q(f0 - axis[0], -fs / fft_size as f64, &buf[..upper_limit + 1], &axis[..upper_limit - 1], replica);
+    for i in 0..upper_limit - 1 {
+        buf[i] += replica[i];
+    }
+}
+
+/// Scratch buffers for `linear_smoothing`, sized in `D4c::new` for the widest width.
+struct SmoothScratch {
+    mirror: Vec<f64>,
+    segment: Vec<f64>,
+    freq_axis: Vec<f64>,
+    low: Vec<f64>,
+    high: Vec<f64>,
+}
+
+/// LinearSmoothing (common.cpp): moving average of `input` over `width` Hz,
+/// written to `output`; both are half-spectra (len fft_size/2 + 1).
+fn linear_smoothing(input: &[f64], output: &mut [f64], width: f64, fs: f64, fft_size: usize, s: &mut SmoothScratch) {
+    let half = fft_size / 2;
+    let boundary = (width * fft_size as f64 / fs) as usize + 1;
+    let mirror_len = half + boundary * 2 + 1;
+    let mirror = &mut s.mirror[..mirror_len];
+    for i in 0..boundary {
+        mirror[i] = input[boundary - i];
+    }
+    mirror[boundary..half + boundary].copy_from_slice(&input[..half]);
+    for i in half + boundary..=half + boundary * 2 {
+        mirror[i] = input[half - (i - (half + boundary))];
+    }
+    let segment = &mut s.segment[..mirror_len];
+    segment[0] = mirror[0] * fs / fft_size as f64;
+    for i in 1..mirror_len {
+        segment[i] = mirror[i] * fs / fft_size as f64 + segment[i - 1];
+    }
+    let freq_axis = &mut s.freq_axis[..=half];
+    for (i, f) in freq_axis.iter_mut().enumerate() {
+        *f = i as f64 / fft_size as f64 * fs - width / 2.0;
+    }
+    let origin = -(boundary as f64 - 0.5) * fs / fft_size as f64;
+    let interval = fs / fft_size as f64;
+    interp1q(origin, interval, segment, freq_axis, &mut s.low[..=half]);
+    for f in freq_axis.iter_mut() {
+        *f += width;
+    }
+    interp1q(origin, interval, segment, freq_axis, &mut s.high[..=half]);
+    for i in 0..=half {
+        output[i] = (s.high[i] - s.low[i]) / width;
+    }
+}
+
+/// GetCentroid (d4c.cpp): energy centroid of the windowed waveform, into `out`.
+/// `re`/`im` are FFT scratch (len fft_size); `window`/`waveform` window scratch;
+/// `spec_re`/`spec_im` hold the first FFT's half-spectrum (len fft_size/2 + 1).
+#[allow(clippy::too_many_arguments)]
+fn get_centroid(x: &[f64], fs: f64, current_f0: f64, center: usize, fft: &Fft, fft_size: usize, out: &mut [f64], re: &mut [f64], im: &mut [f64], window: &mut [f64], waveform: &mut [f64], spec_re: &mut [f64], spec_im: &mut [f64]) {
+    get_windowed_waveform(x, fs, current_f0, center, true, 4.0, waveform, window);
+    let normalize_to = matlab_round(2.0 * fs / current_f0) as usize * 2;
+    let mut power = 0.0;
+    for j in 0..=normalize_to {
+        power += waveform[j] * waveform[j];
+    }
+    let inv = 1.0 / power.sqrt();
+    for j in 0..=normalize_to {
+        waveform[j] *= inv;
+    }
+    let half = fft_size / 2;
+    // First FFT: spectrum of the normalized waveform.
+    re.copy_from_slice(waveform);
+    im.iter_mut().for_each(|v| *v = 0.0);
+    fft.forward(re, im);
+    spec_re[..=half].copy_from_slice(&re[..=half]);
+    spec_im[..=half].copy_from_slice(&im[..=half]);
+    // Second FFT: of waveform * (i+1).
+    for j in 0..fft_size {
+        re[j] = waveform[j] * (j as f64 + 1.0);
+        im[j] = 0.0;
+    }
+    fft.forward(re, im);
+    for i in 0..=half {
+        out[i] = re[i] * spec_re[i] + spec_im[i] * im[i];
+    }
+}
+
+/// D4C scratch buffers + dedicated FFT, sized for `fft_size_d4c`. All allocated
+/// once in `new`; the per-frame computation does no heap allocation.
+struct D4c {
+    fft: Fft,
+    fft_size: usize,
+    fs: f64,
+    number_of_aperiodicities: usize,
+    nuttall_window: Vec<f64>, // Nuttall band window, length window_length
+    coarse_frequency_axis: Vec<f64>, // number_of_aperiodicities + 2
+    coarse_aperiodicity: Vec<f64>, // number_of_aperiodicities + 2
+    frequency_axis: Vec<f64>, // output query axis (cfg.numbins)
+    interp_index: Vec<usize>, // histc scratch for interp1, length numbins
+    re: Vec<f64>, // FFT real buffer, length fft_size
+    im: Vec<f64>, // FFT imag buffer, length fft_size
+    window: Vec<f64>, // F0-adaptive window samples, length fft_size
+    waveform: Vec<f64>, // windowed waveform, length fft_size
+    // half-spectrum buffers (length fft_size/2 + 1)
+    spec_re: Vec<f64>,
+    spec_im: Vec<f64>,
+    centroid1: Vec<f64>,
+    centroid2: Vec<f64>,
+    static_centroid: Vec<f64>,
+    smoothed_power_spectrum: Vec<f64>,
+    static_group_delay: Vec<f64>,
+    smoothed_group_delay: Vec<f64>,
+    power_spectrum: Vec<f64>, // sort + cumsum scratch
+    dc_axis: Vec<f64>,
+    dc_replica: Vec<f64>,
+    smooth: SmoothScratch,
+}
+
+impl D4c {
+    fn new(cfg: &Config) -> Self {
+        let fs = cfg.fs;
+        let fft_size = 2f64.powi(1 + ((4.0 * fs / D4C_FLOOR_F0 + 1.0).ln() / std::f64::consts::LN_2) as i32) as usize;
+        let number_of_aperiodicities =
+            ((D4C_UPPER_LIMIT.min(fs / 2.0 - D4C_FREQUENCY_INTERVAL)) / D4C_FREQUENCY_INTERVAL) as usize;
+        let window_length = (D4C_FREQUENCY_INTERVAL * fft_size as f64 / fs) as usize * 2 + 1;
+        let mut nuttall_window = vec![0.0; window_length];
+        nuttall_window_into(&mut nuttall_window);
+
+        let half = fft_size / 2 + 1;
+        // Coarse axis: 0Hz, then the band centers (3k, 6k, ...), then fs/2.
+        let mut coarse_frequency_axis = vec![0.0; number_of_aperiodicities + 2];
+        for (i, f) in coarse_frequency_axis.iter_mut().enumerate() {
+            *f = i as f64 * D4C_FREQUENCY_INTERVAL;
+        }
+        coarse_frequency_axis[number_of_aperiodicities + 1] = fs / 2.0;
+        let mut coarse_aperiodicity = vec![0.0; number_of_aperiodicities + 2];
+        coarse_aperiodicity[0] = -60.0;
+        coarse_aperiodicity[number_of_aperiodicities + 1] = -D4C_SAFE_GUARD_MINIMUM;
+
+        // Output query axis on reim's analysis FFT grid (i * fs / cfg.fftsize).
+        let mut frequency_axis = vec![0.0; cfg.numbins];
+        for (i, f) in frequency_axis.iter_mut().enumerate() {
+            *f = i as f64 * fs / cfg.fftsize as f64;
+        }
+
+        // Widest DC/smoothing width is the largest f0 = fo_ceil.
+        let max_dc_upper = 2 + (cfg.fo_ceil * fft_size as f64 / fs) as usize;
+        let max_boundary = (cfg.fo_ceil * fft_size as f64 / fs) as usize + 1;
+        let smooth_len = (fft_size / 2) + max_boundary * 2 + 1;
+
+        D4c {
+            fft: Fft::new(fft_size),
+            fft_size,
+            fs,
+            number_of_aperiodicities,
+            nuttall_window,
+            coarse_frequency_axis,
+            coarse_aperiodicity,
+            frequency_axis,
+            interp_index: vec![0; cfg.numbins],
+            re: vec![0.0; fft_size],
+            im: vec![0.0; fft_size],
+            window: vec![0.0; fft_size],
+            waveform: vec![0.0; fft_size],
+            spec_re: vec![0.0; half],
+            spec_im: vec![0.0; half],
+            centroid1: vec![0.0; half],
+            centroid2: vec![0.0; half],
+            static_centroid: vec![0.0; half],
+            smoothed_power_spectrum: vec![0.0; half],
+            static_group_delay: vec![0.0; half],
+            smoothed_group_delay: vec![0.0; half],
+            power_spectrum: vec![0.0; half],
+            dc_axis: vec![0.0; max_dc_upper + 1],
+            dc_replica: vec![0.0; max_dc_upper + 1],
+            smooth: SmoothScratch {
+                mirror: vec![0.0; smooth_len],
+                segment: vec![0.0; smooth_len],
+                freq_axis: vec![0.0; half],
+                low: vec![0.0; half],
+                high: vec![0.0; half],
+            },
+        }
+    }
+
+    /// GetStaticCentroid (d4c.cpp): sum of centroids at +-0.25/f0, DC-corrected,
+    /// into self.static_centroid.
+    fn get_static_centroid(&mut self, x: &[f64], current_f0: f64, center: usize) {
+        let off = matlab_round(0.25 / current_f0 * self.fs);
+        let x_last = x.len() as i64 - 1;
+        let c1 = (center as i64 - off).clamp(0, x_last) as usize;
+        let c2 = (center as i64 + off).clamp(0, x_last) as usize;
+        let half = self.fft_size / 2;
+        get_centroid(x, self.fs, current_f0, c1, &self.fft, self.fft_size, &mut self.centroid1, &mut self.re, &mut self.im, &mut self.window, &mut self.waveform, &mut self.spec_re, &mut self.spec_im);
+        get_centroid(x, self.fs, current_f0, c2, &self.fft, self.fft_size, &mut self.centroid2, &mut self.re, &mut self.im, &mut self.window, &mut self.waveform, &mut self.spec_re, &mut self.spec_im);
+        for i in 0..=half {
+            self.static_centroid[i] = self.centroid1[i] + self.centroid2[i];
+        }
+        dc_correction(&mut self.static_centroid, current_f0, self.fs, self.fft_size, &mut self.dc_axis, &mut self.dc_replica);
+    }
+
+    /// GetSmoothedPowerSpectrum (d4c.cpp): into self.smoothed_power_spectrum.
+    fn get_smoothed_power_spectrum(&mut self, x: &[f64], current_f0: f64, center: usize) {
+        get_windowed_waveform(x, self.fs, current_f0, center, false, 4.0, &mut self.waveform, &mut self.window);
+        self.re.copy_from_slice(&self.waveform);
+        self.im.iter_mut().for_each(|v| *v = 0.0);
+        self.fft.forward(&mut self.re, &mut self.im);
+        let half = self.fft_size / 2;
+        // Reuse power_spectrum as the raw |X|^2 buffer before smoothing.
+        for i in 0..=half {
+            self.power_spectrum[i] = complex_abs2(self.re[i], self.im[i]);
+        }
+        dc_correction(&mut self.power_spectrum, current_f0, self.fs, self.fft_size, &mut self.dc_axis, &mut self.dc_replica);
+        linear_smoothing(&self.power_spectrum, &mut self.smoothed_power_spectrum, current_f0, self.fs, self.fft_size, &mut self.smooth);
+    }
+
+    /// GetStaticGroupDelay (d4c.cpp): into self.static_group_delay.
+    /// On entry self.static_centroid and self.smoothed_power_spectrum are set.
+    fn get_static_group_delay(&mut self, current_f0: f64) {
+        let half = self.fft_size / 2;
+        for i in 0..=half {
+            self.static_group_delay[i] = self.static_centroid[i] / self.smoothed_power_spectrum[i];
+        }
+        // Smooth at f0/2 in place (via spec_re as a temp), then subtract the f0 smooth.
+        linear_smoothing(&self.static_group_delay, &mut self.spec_re, current_f0 / 2.0, self.fs, self.fft_size, &mut self.smooth);
+        self.static_group_delay[..=half].copy_from_slice(&self.spec_re[..=half]);
+        linear_smoothing(&self.static_group_delay, &mut self.smoothed_group_delay, current_f0, self.fs, self.fft_size, &mut self.smooth);
+        for i in 0..=half {
+            self.static_group_delay[i] -= self.smoothed_group_delay[i];
+        }
+    }
+
+    /// GetCoarseAperiodicity (d4c.cpp): per-band HNR readout from the group delay,
+    /// into self.coarse_aperiodicity[1..=number_of_aperiodicities].
+    fn get_coarse_aperiodicity(&mut self) {
+        let (fft_size, fs) = (self.fft_size, self.fs);
+        let half = fft_size / 2;
+        let window_length = self.nuttall_window.len();
+        let half_window_length = window_length / 2;
+        let boundary = matlab_round(fft_size as f64 * 8.0 / window_length as f64) as usize;
+        for i in 0..self.number_of_aperiodicities {
+            let band_center = (D4C_FREQUENCY_INTERVAL * (i + 1) as f64 * fft_size as f64 / fs) as usize;
+            for j in 0..=half_window_length * 2 {
+                self.re[j] = self.static_group_delay[band_center - half_window_length + j] * self.nuttall_window[j];
+            }
+            for r in self.re[half_window_length * 2 + 1..].iter_mut() {
+                *r = 0.0;
+            }
+            self.im.iter_mut().for_each(|v| *v = 0.0);
+            self.fft.forward(&mut self.re, &mut self.im);
+            for j in 0..=half {
+                self.power_spectrum[j] = complex_abs2(self.re[j], self.im[j]);
+            }
+            // total_cmp (not partial_cmp) so a NaN from a degenerate frame (e.g. a pure
+            // tone with near-zero broadband energy) sorts deterministically instead of
+            // panicking; finite values order identically.
+            self.power_spectrum[..=half].sort_unstable_by(f64::total_cmp);
+            for j in 1..=half {
+                self.power_spectrum[j] += self.power_spectrum[j - 1];
+            }
+            self.coarse_aperiodicity[i + 1] =
+                10.0 * (self.power_spectrum[half - boundary - 1] / self.power_spectrum[half]).log10();
+        }
+    }
+
+    /// Full D4C for one voiced frame: write per-bin linear aperiodicity into `ap`.
+    fn analyze(&mut self, x: &[f64], fo: f64, center: usize, ap: &mut [f64]) {
+        let current_f0 = fo.max(D4C_FLOOR_F0);
+        self.get_static_centroid(x, current_f0, center);
+        self.get_smoothed_power_spectrum(x, current_f0, center);
+        self.get_static_group_delay(current_f0);
+        self.get_coarse_aperiodicity();
+        // F0 revision (D4CGeneralBody).
+        for i in 0..self.number_of_aperiodicities {
+            self.coarse_aperiodicity[i + 1] =
+                (self.coarse_aperiodicity[i + 1] + (current_f0 - 100.0) / 50.0).min(0.0);
+        }
+        // GetAperiodicity: interpolate coarse dB onto the output axis, then dB->linear.
+        interp1(&self.coarse_frequency_axis, &self.coarse_aperiodicity, &self.frequency_axis, &mut self.interp_index, ap);
+        for a in ap.iter_mut() {
+            *a = 10f64.powf(*a / 20.0);
+        }
+    }
+}
 impl ApAnalyzer {
     fn new(cfg: &Config) -> Self {
-        ApAnalyzer { x_real: vec![0.0; cfg.fftsize], x_imag: vec![0.0; cfg.fftsize] }
+        ApAnalyzer {
+            x_real: vec![0.0; cfg.fftsize],
+            x_imag: vec![0.0; cfg.fftsize],
+            d4c: D4c::new(cfg),
+        }
     }
 
     /// Returns true for a voiced frame; writes per-bin aperiodicity into `ap`.
+    /// Voiced frames get WORLD D4C band-aperiodicity; everything else is fully
+    /// aperiodic (1.0), matching the placeholder's unvoiced behaviour.
     fn analyze(&mut self, cfg: &Config, fft: &Fft, input: &[f64], fo: f64, issilence: bool, ap: &mut [f64]) -> bool {
         let numbins = cfg.numbins;
         // Mirror the C guard exactly (analyze_ap.c:79): bail to unvoiced when silent
@@ -722,7 +1141,11 @@ impl ApAnalyzer {
             && !out_of_range
             && !low_band_dominated(input, &mut self.x_real, &mut self.x_imag, cfg.fftsize, fo, cfg.fs, fft)
             && estimate_is_voiced(input, &mut self.x_real, &mut self.x_imag, cfg.fftsize, fo, cfg.fs, fft);
-        ap[..numbins].fill(if voiced { 1e-3 } else { 1.0 });
+        if voiced {
+            self.d4c.analyze(input, fo, cfg.fftsize / 2, &mut ap[..numbins]);
+        } else {
+            ap[..numbins].fill(1.0);
+        }
         voiced
     }
 }
