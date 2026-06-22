@@ -208,7 +208,10 @@ fn cmd_f0(input: &str, fmin: Option<&str>, fmax: Option<&str>, fftarg: Option<&s
         if reim.frame_count() != last {
             last = reim.frame_count();
             let t = ((i as f64 - half) / fs).max(0.0);
-            out.push_str(&format!("{t:.6},{:.4}\n", reim.last_fo()));
+            // emit pitch only on voiced frames so the contour reflects the full
+            // voicing decision (incl. the sub-fundamental rumble guard), not just analyze_fo
+            let fo = if reim.last_voiced() { reim.last_fo() } else { 0.0 };
+            out.push_str(&format!("{t:.6},{fo:.4}\n"));
         }
     }
     print!("{out}");

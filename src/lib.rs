@@ -646,6 +646,26 @@ struct ApAnalyzer {
     x_imag: Vec<f64>,
 }
 
+// Reject a frame as unvoiced when its energy is concentrated BELOW the detected
+// fundamental (rumble / mains hum) -- the gap the HF LoveTrain leaves open. Uses a
+// full-frame Hann window for low-frequency resolution. Returns true = sub-fo energy
+// dominates the fundamental+harmonic band, so it is not a real voice. Tunable.
+const LOWBAND_REJECT_RATIO: f64 = 0.4;
+
+fn low_band_dominated(input: &[f64], re: &mut [f64], im: &mut [f64], fftsize: usize, fo: f64, fs: f64, fft: &Fft) -> bool {
+    for i in 0..fftsize {
+        re[i] = input[i] * hanning_window(i as f64, fftsize as f64, fftsize as f64);
+        im[i] = 0.0;
+    }
+    fft.forward(re, im);
+    let bin = |hz: f64| ((hz / fs * fftsize as f64) as usize).min(fftsize / 2);
+    let (lo, mid) = (bin(20.0), bin(0.8 * fo));
+    let hi = bin((6.0 * fo).min(fs / 2.0 - 1.0));
+    let sub: f64 = (lo..mid).map(|k| complex_abs2(re[k], im[k])).sum();
+    let voice: f64 = (mid..=hi).map(|k| complex_abs2(re[k], im[k])).sum();
+    sub > LOWBAND_REJECT_RATIO * (sub + voice + 1e-12)
+}
+
 /// D4C "LoveTrain"-style voiced/unvoiced decision based on low/high band energy.
 fn estimate_is_voiced(input: &[f64], re: &mut [f64], im: &mut [f64], fftsize: usize, fo: f64, fs: f64, fft: &Fft) -> bool {
     if fs < 16000.0 {
@@ -689,6 +709,7 @@ impl ApAnalyzer {
         let out_of_range = fo < cfg.fo_floor || fo > cfg.fo_ceil;
         let voiced = !issilence
             && !out_of_range
+            && !low_band_dominated(input, &mut self.x_real, &mut self.x_imag, cfg.fftsize, fo, cfg.fs, fft)
             && estimate_is_voiced(input, &mut self.x_real, &mut self.x_imag, cfg.fftsize, fo, cfg.fs, fft);
         let value = if voiced { 1e-3 } else { 1.0 };
         for a in ap.iter_mut().take(numbins) {
