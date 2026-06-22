@@ -402,6 +402,7 @@ struct FoAnalyzer {
     filtered_r: Vec<f64>,
     filtered_i: Vec<f64>,
     fo_previous: f64,
+    last_score: f64,
 }
 
 fn get_interpolated_spectrum(freq: f64, fs: f64, spec: &[f64], numbins: usize) -> f64 {
@@ -564,6 +565,7 @@ impl FoAnalyzer {
             filtered_r: vec![0.0; fftsize],
             filtered_i: vec![0.0; fftsize],
             fo_previous: 0.0,
+            last_score: 0.0,
         }
     }
 
@@ -635,6 +637,7 @@ impl FoAnalyzer {
             }
         }
 
+        self.last_score = best_score;
         if best_fo < fo_floor || best_fo > fo_ceil || best_score < 0.0 {
             return 0.0;
         }
@@ -651,6 +654,7 @@ struct ApAnalyzer {
     x_real: Vec<f64>,
     x_imag: Vec<f64>,
     d4c: D4c,
+    score_min: f64, // periodicity-gate threshold; 0.0 = gate off (default)
 }
 
 // Reject a frame as unvoiced when its energy is concentrated BELOW the detected
@@ -1125,13 +1129,17 @@ impl ApAnalyzer {
             x_real: vec![0.0; cfg.fftsize],
             x_imag: vec![0.0; cfg.fftsize],
             d4c: D4c::new(cfg),
+            score_min: 0.0,
         }
     }
 
     /// Returns true for a voiced frame; writes per-bin aperiodicity into `ap`.
     /// Voiced frames get WORLD D4C band-aperiodicity; everything else is fully
-    /// aperiodic (1.0), matching the placeholder's unvoiced behaviour.
-    fn analyze(&mut self, cfg: &Config, fft: &Fft, input: &[f64], fo: f64, issilence: bool, ap: &mut [f64]) -> bool {
+    /// aperiodic (1.0), matching the placeholder's unvoiced behaviour. `score` is
+    /// the Fo tracker's SRH harmonic score; the optional periodicity gate
+    /// (`score >= score_min`, default 0.0 = off) rejects low-periodicity frames
+    /// (see [`Reim::set_voicing_score_min`]). It is opt-in/experimental.
+    fn analyze(&mut self, cfg: &Config, fft: &Fft, input: &[f64], fo: f64, score: f64, issilence: bool, ap: &mut [f64]) -> bool {
         let numbins = cfg.numbins;
         // Mirror the C guard exactly (analyze_ap.c:79): bail to unvoiced when silent
         // or fo is out of range. The negated range test (rather than `>=`/`<=`) makes
@@ -1139,6 +1147,7 @@ impl ApAnalyzer {
         let out_of_range = fo < cfg.fo_floor || fo > cfg.fo_ceil;
         let voiced = !issilence
             && !out_of_range
+            && score >= self.score_min
             && !low_band_dominated(input, &mut self.x_real, &mut self.x_imag, cfg.fftsize, fo, cfg.fs, fft)
             && estimate_is_voiced(input, &mut self.x_real, &mut self.x_imag, cfg.fftsize, fo, cfg.fs, fft);
         if voiced {
@@ -1567,7 +1576,7 @@ impl Reim {
             let (wave_d, wave) = (&self.frame_window[..fftsize], &self.frame_window[1..fftsize + 1]);
             let silence = analyze_silence(&self.cfg, wave, SILENCE_THRESHOLD);
             let fo = self.fo.analyze(&self.cfg, &self.fft, wave, wave_d);
-            let voiced = self.ap.analyze(&self.cfg, &self.fft, wave, fo, silence, &mut self.ap_buf);
+            let voiced = self.ap.analyze(&self.cfg, &self.fft, wave, fo, self.fo.last_score, silence, &mut self.ap_buf);
             self.sp.analyze(&self.cfg, &self.fft, wave, fo, voiced, silence, &mut self.sp_buf);
             self.syn.new_frame(&self.cfg, &self.fft, fo, voiced, silence, &self.ap_buf, &self.sp_buf);
             self.last_fo = fo;
@@ -1615,6 +1624,16 @@ impl Reim {
     /// ~1 = fully aperiodic.
     pub fn last_aperiodicity(&self) -> &[f64] {
         &self.ap_buf
+    }
+    /// Set the minimum SRH harmonic score for a frame to be judged voiced
+    /// (default 0.0 = off). Above 0 this is an opt-in, EXPERIMENTAL periodicity
+    /// gate: the Fo tracker returns a candidate even on breath/noise, and true
+    /// voiced frames score orders of magnitude higher, so a threshold (~1e3 on
+    /// Vocadito) cuts voicing false alarms sharply. Tradeoff: it also rejects
+    /// some soft/decaying true-voiced frames. See `plans/merge-d4c-and-vfa.md`
+    /// and the README "Voicing" section.
+    pub fn set_voicing_score_min(&mut self, min: f64) {
+        self.ap.score_min = min;
     }
 }
 
@@ -1750,7 +1769,7 @@ impl Reim {
                 let fo = r.fo.analyze(&cfg, &r.fft, wave, wave_d);
                 t_fo += t.elapsed().as_secs_f64();
                 let t = Instant::now();
-                let voiced = r.ap.analyze(&cfg, &r.fft, wave, fo, silence, &mut r.ap_buf);
+                let voiced = r.ap.analyze(&cfg, &r.fft, wave, fo, r.fo.last_score, silence, &mut r.ap_buf);
                 t_ap += t.elapsed().as_secs_f64();
                 let t = Instant::now();
                 r.sp.analyze(&cfg, &r.fft, wave, fo, voiced, silence, &mut r.sp_buf);
@@ -2024,7 +2043,7 @@ mod tests {
             .map(|i| (2.0 * std::f64::consts::PI * 200.0 * i as f64 / cfg.fs).sin())
             .collect();
         let mut buf = vec![0.0; cfg.numbins];
-        let voiced = ap.analyze(&cfg, &fft, &input, f64::NAN, false, &mut buf);
+        let voiced = ap.analyze(&cfg, &fft, &input, f64::NAN, f64::INFINITY, false, &mut buf);
         // independent reference: the decision C reaches for a NaN fo
         let mut re = vec![0.0; cfg.fftsize];
         let mut im = vec![0.0; cfg.fftsize];
@@ -2040,5 +2059,32 @@ mod tests {
         let mut out = vec![0.0; input.len()];
         r.process_block(&input, &mut out);
         assert!(out.iter().all(|x| x.is_finite()));
+    }
+
+    #[test]
+    fn voicing_score_gate_is_opt_in() {
+        // Default (score_min = 0) leaves voicing unchanged; a huge threshold
+        // rejects every frame. Verifies the opt-in periodicity-gate plumbing.
+        let fs = 24000.0;
+        let n = (fs * 0.5) as usize;
+        let input: Vec<f64> = (0..n).map(|i| 0.5 * (2.0 * std::f64::consts::PI * 200.0 * i as f64 / fs).sin()).collect();
+        let count_voiced = |min: f64| {
+            let mut r = Reim::with_defaults(fs);
+            r.set_voicing_score_min(min);
+            let mut last = 0u64;
+            let mut voiced = 0usize;
+            for &x in &input {
+                r.process_sample(x);
+                if r.frame_count() != last {
+                    last = r.frame_count();
+                    if r.last_voiced() {
+                        voiced += 1;
+                    }
+                }
+            }
+            voiced
+        };
+        assert!(count_voiced(0.0) > 0, "gate off: a 200 Hz tone must have voiced frames");
+        assert_eq!(count_voiced(f64::INFINITY), 0, "infinite threshold must reject all frames");
     }
 }

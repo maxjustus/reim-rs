@@ -202,6 +202,20 @@ TTS speech it is roughly neutral (RPA -1.3). The guard surfaces only through
 `last_voiced()`; its threshold is an internal eval-chosen constant. It does not
 fire on clean speech, so it leaves the oracle agreement above unchanged.
 
+ReIm also ships an **optional, experimental periodicity gate, off by default**.
+The Fo tracker returns a best candidate even on breath or noise, so a fo-in-range
+frame is not necessarily voiced; true voiced frames carry an SRH harmonic score
+orders of magnitude higher. Enabling the gate — `Reim::set_voicing_score_min(x)`,
+or the `REIM_VOICING_SCORE_MIN` env var for the CLI (≈1e3 on Vocadito) — requires
+that score to clear a threshold. On Vocadito (40 clips) it cuts the voicing
+false-alarm rate from 0.67 to 0.19 and lifts voicing F1 from 0.85 to 0.93.
+**Tradeoff:** it also rejects ~5% of true-voiced frames — mostly soft/decaying
+ones and note edges — which then resynthesize as noise instead of pitched pulses
+(audibly clipping soft note tails). The score is level-independent (a power
+ratio), but the threshold is eval-chosen on a single dataset and **needs more
+testing before it could become a default**, hence opt-in. With the default (0.0)
+the gate is inert and voicing matches the faithful C decision.
+
 `reim f0` reports pitch only on frames this decision marks voiced, so the printed
 contour reflects the full voicing logic, not just the raw tracker.
 

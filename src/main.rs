@@ -7,9 +7,18 @@
 
 use reim::{default_fftsize, read_wav, write_wav_f32, Reim};
 
+// Optional, EXPERIMENTAL: enable the voicing periodicity gate from the CLI via the
+// REIM_VOICING_SCORE_MIN env var (e.g. =1000). Default off. See README "Voicing".
+fn apply_voicing_env(reim: &mut Reim) {
+    if let Some(x) = std::env::var("REIM_VOICING_SCORE_MIN").ok().and_then(|v| v.parse::<f64>().ok()) {
+        reim.set_voicing_score_min(x);
+    }
+}
+
 fn cmd_process(input: &str, output: &str) -> Result<(), String> {
     let wav = read_wav(input)?;
     let mut reim = Reim::with_defaults(wav.sample_rate as f64);
+    apply_voicing_env(&mut reim);
     let mut out = vec![0.0; wav.samples.len()];
     reim.process_block(&wav.samples, &mut out);
     write_wav_f32(output, &out, wav.sample_rate)?;
@@ -69,6 +78,7 @@ fn cmd_eval(reference: &str, input: &str, feat: Option<&str>) -> Result<(), Stri
     let refwav = read_wav(reference)?;
     let inwav = read_wav(input)?;
     let mut reim = Reim::with_defaults(inwav.sample_rate as f64);
+    apply_voicing_env(&mut reim);
 
     // collect per-frame features as we go
     let mut fo_rust: Vec<(bool, f64, bool)> = Vec::new();
@@ -210,6 +220,7 @@ fn cmd_f0(input: &str, fmin: Option<&str>, fmax: Option<&str>, fftarg: Option<&s
         None => default_fftsize(fs, fo_floor),
     };
     let mut reim = Reim::new(fs, 5.0, fftsize, fo_floor, fo_ceil);
+    apply_voicing_env(&mut reim);
     let half = fftsize as f64 / 2.0;
     let mut last = 0u64;
     let mut out = String::new();
@@ -233,6 +244,7 @@ fn cmd_f0(input: &str, fmin: Option<&str>, fmax: Option<&str>, fftarg: Option<&s
 fn cmd_ap(input: &str, output: &str) -> Result<(), String> {
     let wav = read_wav(input)?;
     let mut reim = Reim::with_defaults(wav.sample_rate as f64);
+    apply_voicing_env(&mut reim);
     let mut bytes = Vec::new();
     let mut last = 0u64;
     for &x in &wav.samples {
