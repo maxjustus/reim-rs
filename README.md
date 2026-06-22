@@ -264,6 +264,20 @@ ratio), but the threshold is eval-chosen on a single dataset and **needs more
 testing before it could become a default**, hence opt-in. With the default (0.0)
 the gate is inert and voicing matches the faithful C decision.
 
+The threshold is the recall/precision dial (Vocadito, 40 clips):
+
+| `score_min` | voicing FA | recall | F1   |                                   |
+| ----------- | ---------- | ------ | ---- | --------------------------------- |
+| 0           | 0.67       | 0.997  | 0.85 | off (default; C-faithful voicing) |
+| 1000        | 0.19       | 0.946  | 0.93 | balanced — F1 optimum / the knee  |
+| 1e4         | 0.13       | 0.909  | 0.92 | precision-leaning                 |
+
+1000 is the knee: it removes ~72% of the false alarms for ~5% recall. Lower it
+(toward ~400-600) to lean back toward recall — fewer clipped soft tails, more
+false alarms; raise it for fewer false alarms at more recall cost. Calibrated on
+singing, so another corpus may shift the optimum. (Hysteresis on the gate was
+tried and gave no better recall/precision tradeoff than this single threshold.)
+
 `reim f0` reports pitch only on frames this decision marks voiced, so the printed
 contour reflects the full voicing logic, not just the raw tracker.
 
