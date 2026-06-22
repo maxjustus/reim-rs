@@ -647,7 +647,8 @@ struct ApAnalyzer {
 // Reject a frame as unvoiced when its energy is concentrated BELOW the detected
 // fundamental (rumble / mains hum) -- the gap the HF LoveTrain leaves open. Uses a
 // full-frame Hann window for low-frequency resolution. Returns true = sub-fo energy
-// dominates the fundamental+harmonic band, so it is not a real voice. Tunable.
+// dominates the fundamental+harmonic band, so it is not a real voice. The 0.4 ratio
+// is an internal, eval-chosen constant; it is not part of the public API.
 const LOWBAND_REJECT_RATIO: f64 = 0.4;
 
 fn low_band_dominated(input: &[f64], re: &mut [f64], im: &mut [f64], fftsize: usize, fo: f64, fs: f64, fft: &Fft) -> bool {
@@ -1138,11 +1139,19 @@ impl Reim {
     pub fn frame_count(&self) -> u64 {
         self.frame_count
     }
-    /// Most recent frame's estimated Fo in Hz (0.0 when no pitch).
+    /// Pitch-tracker estimate for the most recent frame, in Hz (0.0 when the
+    /// tracker found no periodicity). This is the raw Fo and is independent of
+    /// the voicing decision: it can be nonzero on a frame `last_voiced()`
+    /// rejects (e.g. rumble the voicing guard discards). Gate on `last_voiced()`
+    /// if you only want pitch for frames judged to carry voice.
     pub fn last_fo(&self) -> f64 {
         self.last_fo
     }
-    /// Whether the most recent frame was voiced.
+    /// Whether the most recent frame was judged voiced. This is the full
+    /// voiced/unvoiced decision, separate from the pitch tracker (`last_fo()`):
+    /// a frame is voiced only when it is not silence, its Fo lies in
+    /// `[fo_floor, fo_ceil]`, its energy is not dominated by sub-fundamental
+    /// rumble/hum, and it passes the D4C band-energy ratio.
     pub fn last_voiced(&self) -> bool {
         self.last_voiced
     }

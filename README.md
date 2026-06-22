@@ -150,6 +150,27 @@ speech pitch extraction, so this is somewhat out of its envelope; the synthetic
 tones above (where it beat YIN) were too favorable. Learned models (CREPE,
 SwiftF0, RMVPE) lead that benchmark and were not run here.
 
+## Voicing
+
+The voiced/unvoiced flag (`reim.last_voiced()`) is decided in the Ap stage,
+independently of the pitch tracker, via a D4C-style high/low band-energy ratio.
+On top of the faithful C decision, ReIm adds a sub-fundamental guard: a frame is
+rejected as unvoiced when energy below ~0.8·Fo (rumble, mains hum, HVAC)
+dominates the fundamental-plus-harmonic band. The C's "LoveTrain" only suppresses
+*high*-band noise, so low-frequency rumble sitting inside `[fo_floor, fo_ceil]`
+would otherwise read as voiced.
+
+On synthetic probes the guard cuts broadband rumble from 99% to 15% voiced and
+mains hum to 0%, at no cost to clean voice (vibrato/breathy stay 100%). On real
+solo singing ([Vocadito](https://zenodo.org/records/5578807), 40 clips) voicing
+F1 rises 83.5 -> 86.2 (precision up, recall flat) with RPA unchanged; on 16 kHz
+TTS speech it is roughly neutral (RPA -1.3). The guard surfaces only through
+`last_voiced()`; its threshold is an internal eval-chosen constant. It does not
+fire on clean speech, so it leaves the oracle agreement above unchanged.
+
+`reim f0` reports pitch only on frames this decision marks voiced, so the printed
+contour reflects the full voicing logic, not just the raw tracker.
+
 ## Performance
 
 `reim bench` on the bundled voice file (24 kHz): ~14x real time, per-frame
