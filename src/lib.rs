@@ -1625,6 +1625,14 @@ impl Reim {
     pub fn last_aperiodicity(&self) -> &[f64] {
         &self.ap_buf
     }
+    /// Per-bin spectral envelope (CheapTrick) for the most recent frame, length
+    /// `fftsize/2 + 1`: the smoothed power spectrum carrying the formant
+    /// structure. With `last_fo`/`last_voiced`/`last_aperiodicity` this is the
+    /// full per-frame WORLD parameter set (read it after each `process_sample`
+    /// that advances `frame_count`).
+    pub fn last_spectral_envelope(&self) -> &[f64] {
+        &self.sp_buf
+    }
     /// Set the minimum SRH harmonic score for a frame to be judged voiced
     /// (default 0.0 = off). Above 0 this is an opt-in, EXPERIMENTAL periodicity
     /// gate: the Fo tracker returns a candidate even on breath/noise, and true

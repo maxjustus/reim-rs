@@ -59,6 +59,34 @@ for (out_sample, &in_sample) in output.iter_mut().zip(input) {
 }
 ```
 
+### Reading the per-frame analysis parameters
+
+The full WORLD parameter set is exposed per frame. Push samples and, whenever a
+new analysis frame lands (`frame_count` advances), read the parameters — to feed
+your own synthesis, feature pipeline, or analysis:
+
+```rust
+let mut reim = Reim::with_defaults(48_000.0);
+let mut last = 0;
+for &x in &input {
+    reim.process_sample(x);
+    if reim.frame_count() != last {
+        last = reim.frame_count();
+        let f0       = reim.last_fo();                 // Hz, 0.0 = unvoiced
+        let voiced   = reim.last_voiced();
+        let envelope = reim.last_spectral_envelope();  // &[f64], len fftsize/2 + 1 (formants)
+        let aperiod  = reim.last_aperiodicity();       // &[f64], same length (D4C)
+        // ... consume the parameters
+    }
+}
+```
+
+Note: today this still runs synthesis internally (the returned sample can be
+ignored). A planned refactor splits analysis and synthesis into separate
+`Analyzer` / `Synthesizer` types so synthesis is skippable and the parameters can
+be manipulated (e.g. formant shifting) before resynthesis — see
+`plans/analysis-synthesis-decoupling.md`.
+
 Latency note: input->output latency is dominated by `fftsize`. Its floor is the
 `fftsize/2`-sample synthesis group delay; measured end-to-end it is ≈49 ms at
 48 kHz and ≈89 ms at 24 kHz with the default `fftsize=2048`. Because it is fixed
