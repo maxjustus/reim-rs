@@ -287,3 +287,39 @@ contour reflects the full voicing logic, not just the raw tracker.
 analysis p99 ~375 us against a 5 ms frame budget (~13x headroom). Fo analysis
 dominates (~52% of frame work). The per-sample synthesis path is the only work
 done outside frame boundaries.
+
+## Terminology
+
+The three analysis parameters: **Fo** fundamental frequency (pitch), **Sp**
+spectral envelope (formants), **Ap** aperiodicity (per-bin noise-to-total ratio).
+
+Metrics (used in Pitch accuracy / Voicing / Evaluation):
+
+- **cent** — 1/100 of a semitone (1200 cents per octave); the unit for pitch error.
+- **precision / recall** (voicing) — of the frames *called* voiced, the fraction
+  truly voiced (precision); of the *truly* voiced frames, the fraction called
+  voiced (recall).
+- **F1** — the harmonic mean of precision and recall, `2·P·R/(P+R)`: one 0-1 score
+  that is high only when *both* are high. "Voicing F1" applies it to the per-frame
+  voiced/unvoiced decision.
+- **voicing false alarm (VFA)** — of the truly *unvoiced* frames, the fraction
+  wrongly called voiced (over-voicing). Lower is better.
+- **RPA** (raw pitch accuracy) — fraction of voiced frames whose estimated Fo is
+  within 50 cents of ground truth. **RCA** (raw chroma accuracy) — the same but
+  octave-invariant; RPA << RCA means the tracker has the right pitch class in the
+  wrong octave (octave errors).
+- **gross / octave error** — gross = Fo off by > 50 cents; octave = off by within
+  50 cents of a 2x/0.5x of the true Fo.
+- **MCD / LSD** — mel-cepstral distortion / log-spectral distance: phase-invariant
+  spectral distances (dB) between input and resynthesis (lower = closer).
+- **SNR** — signal-to-noise ratio (dB): reference energy over error energy.
+
+Methods (the C reference is a WORLD-like vocoder; these are its stages):
+
+- **WORLD** — the analysis/synthesis vocoder family ReIm follows.
+- **DIO** — zero-crossing-based Fo *candidate* generator; **SRH** (summation of
+  residual harmonics) scores the candidates to pick Fo; **StoneMask** is the
+  instantaneous-frequency Fo refinement.
+- **CheapTrick** — the spectral-envelope estimator. **D4C** — the band-aperiodicity
+  estimator; its **LoveTrain** step is a high/low band-energy voiced/unvoiced test.
+- **velvet noise** — sparse signed impulses used as the aperiodic excitation.
