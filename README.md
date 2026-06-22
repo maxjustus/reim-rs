@@ -61,30 +61,27 @@ for (out_sample, &in_sample) in output.iter_mut().zip(input) {
 
 ### Reading the per-frame analysis parameters
 
-The full WORLD parameter set is exposed per frame. Push samples and, whenever a
-new analysis frame lands (`frame_count` advances), read the parameters — to feed
-your own synthesis, feature pipeline, or analysis:
+For analysis without synthesis — real-time parameter extraction when you supply
+your own synthesizer — use `analyze_sample`, which skips the synthesis cost. It
+returns `true` when a new analysis frame is ready; read the full WORLD parameter
+set from the accessors:
 
 ```rust
 let mut reim = Reim::with_defaults(48_000.0);
-let mut last = 0;
 for &x in &input {
-    reim.process_sample(x);
-    if reim.frame_count() != last {
-        last = reim.frame_count();
+    if reim.analyze_sample(x) {                        // analysis only, no synthesis
         let f0       = reim.last_fo();                 // Hz, 0.0 = unvoiced
         let voiced   = reim.last_voiced();
         let envelope = reim.last_spectral_envelope();  // &[f64], len fftsize/2 + 1 (formants)
         let aperiod  = reim.last_aperiodicity();       // &[f64], same length (D4C)
-        // ... consume the parameters
+        // ... feed your own synthesis / feature pipeline
     }
 }
 ```
 
-Note: today this still runs synthesis internally (the returned sample can be
-ignored). A planned refactor splits analysis and synthesis into separate
-`Analyzer` / `Synthesizer` types so synthesis is skippable and the parameters can
-be manipulated (e.g. formant shifting) before resynthesis — see
+`process_sample` remains the one-call analyze + resynthesize path. A planned
+refactor additionally exposes a reusable `Synthesizer` so the parameters can be
+manipulated (e.g. formant shifting) and fed back to ReIm's own synth — see
 `plans/analysis-synthesis-decoupling.md`.
 
 Latency note: input->output latency is dominated by `fftsize`. Its floor is the

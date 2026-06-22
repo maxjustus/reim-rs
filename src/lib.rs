@@ -1568,21 +1568,41 @@ impl Reim {
         Reim::new(fs, 5.0, default_fftsize(fs, fo_floor), fo_floor, 800.0)
     }
 
-    /// Process one input sample, returning one output sample. Allocation-free.
+    /// Analyze the current frame window into the per-frame parameters/state
+    /// (silence, Fo, voiced, aperiodicity, spectral envelope). No synthesis.
+    fn analyze_current_frame(&mut self) {
+        let fftsize = self.cfg.fftsize;
+        // `wave` is the frame; `wave_d` is the same frame delayed by one sample.
+        let (wave_d, wave) = (&self.frame_window[..fftsize], &self.frame_window[1..fftsize + 1]);
+        let silence = analyze_silence(&self.cfg, wave, SILENCE_THRESHOLD);
+        let fo = self.fo.analyze(&self.cfg, &self.fft, wave, wave_d);
+        let voiced = self.ap.analyze(&self.cfg, &self.fft, wave, fo, self.fo.last_score, silence, &mut self.ap_buf);
+        self.sp.analyze(&self.cfg, &self.fft, wave, fo, voiced, silence, &mut self.sp_buf);
+        self.last_fo = fo;
+        self.last_voiced = voiced;
+        self.last_silence = silence;
+        self.frame_count += 1;
+    }
+
+    /// Analyze one input sample WITHOUT synthesizing. Returns true when a new
+    /// analysis frame is ready; read it via `last_fo`/`last_voiced`/
+    /// `last_silence`/`last_aperiodicity`/`last_spectral_envelope`. Use this for
+    /// real-time analysis when you supply your own synthesis — it skips the
+    /// synthesis cost entirely. Allocation-free.
+    pub fn analyze_sample(&mut self, input: f64) -> bool {
+        let new_frame = self.framer.next(input, &mut self.frame_window);
+        if new_frame {
+            self.analyze_current_frame();
+        }
+        new_frame
+    }
+
+    /// Process one input sample, returning one output sample (analysis +
+    /// synthesis). Allocation-free.
     pub fn process_sample(&mut self, input: f64) -> f64 {
         if self.framer.next(input, &mut self.frame_window) {
-            let fftsize = self.cfg.fftsize;
-            // `wave` is the frame; `wave_d` is the same frame delayed by one sample.
-            let (wave_d, wave) = (&self.frame_window[..fftsize], &self.frame_window[1..fftsize + 1]);
-            let silence = analyze_silence(&self.cfg, wave, SILENCE_THRESHOLD);
-            let fo = self.fo.analyze(&self.cfg, &self.fft, wave, wave_d);
-            let voiced = self.ap.analyze(&self.cfg, &self.fft, wave, fo, self.fo.last_score, silence, &mut self.ap_buf);
-            self.sp.analyze(&self.cfg, &self.fft, wave, fo, voiced, silence, &mut self.sp_buf);
-            self.syn.new_frame(&self.cfg, &self.fft, fo, voiced, silence, &self.ap_buf, &self.sp_buf);
-            self.last_fo = fo;
-            self.last_voiced = voiced;
-            self.last_silence = silence;
-            self.frame_count += 1;
+            self.analyze_current_frame();
+            self.syn.new_frame(&self.cfg, &self.fft, self.last_fo, self.last_voiced, self.last_silence, &self.ap_buf, &self.sp_buf);
         }
         self.syn.next_sample(&self.cfg, &self.fft)
     }
@@ -2094,5 +2114,26 @@ mod tests {
         };
         assert!(count_voiced(0.0) > 0, "gate off: a 200 Hz tone must have voiced frames");
         assert_eq!(count_voiced(f64::INFINITY), 0, "infinite threshold must reject all frames");
+    }
+
+    #[test]
+    fn analyze_sample_matches_process_sample_analysis() {
+        // analyze_sample must yield the same per-frame parameters as process_sample,
+        // only skipping synthesis (they share analyze_current_frame).
+        let fs = 24000.0;
+        let n = (fs * 0.4) as usize;
+        let input: Vec<f64> = (0..n).map(|i| 0.5 * (2.0 * std::f64::consts::PI * 180.0 * i as f64 / fs).sin()).collect();
+        let mut a = Reim::with_defaults(fs);
+        let mut b = Reim::with_defaults(fs);
+        for &x in &input {
+            a.analyze_sample(x);
+            b.process_sample(x);
+        }
+        assert_eq!(a.frame_count(), b.frame_count());
+        assert_eq!(a.last_fo(), b.last_fo());
+        assert_eq!(a.last_voiced(), b.last_voiced());
+        assert_eq!(a.last_silence(), b.last_silence());
+        assert_eq!(a.last_spectral_envelope(), b.last_spectral_envelope());
+        assert_eq!(a.last_aperiodicity(), b.last_aperiodicity());
     }
 }
