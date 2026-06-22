@@ -441,22 +441,23 @@ fn get_harmonic_score(fo: f64, fs: f64, pspec: &[f64], numbins: usize) -> f64 {
 }
 
 /// Estimate Fo from zero-crossings / peaks / dips of a band-limited waveform.
-/// Returns (fo, relative-std-deviation) or None when no intervals were found.
-fn analyze_fo_with_zerocross(x: &[f64], fs: f64) -> Option<(f64, f64)> {
+/// Returns the mean interval-frequency, or None when no intervals were found or
+/// the candidate fails the periodicity gate (see below).
+fn analyze_fo_with_zerocross(x: &[f64], fs: f64) -> Option<f64> {
     let length = x.len();
     let mut last_positive: i64 = -1;
     let mut last_negative: i64 = -1;
     let mut last_peak: i64 = -1;
     let mut last_dip: i64 = -1;
 
-    let mut denominator = 0.0;
+    let mut total_interval = 0.0;
     let mut sum_freq = 0.0;
     let mut sum_square_freq = 0.0;
 
     let mut accumulate = |i: i64, last: i64| {
         let interval = (i - last) as f64;
         let freq = fs / interval;
-        denominator += interval;
+        total_interval += interval;
         sum_freq += freq * interval;
         sum_square_freq += freq * freq * interval;
     };
@@ -494,22 +495,27 @@ fn analyze_fo_with_zerocross(x: &[f64], fs: f64) -> Option<(f64, f64)> {
         xdiffprev = xdiffcurr;
     }
 
-    if denominator <= 0.0 {
+    if total_interval <= 0.0 {
         return None;
     }
-    let mean_freq = sum_freq / denominator;
+    let mean_freq = sum_freq / total_interval;
     if mean_freq <= 0.0 || mean_freq > fs / 2.0 {
         return None;
     }
-    // NOTE: faithful to a variance-formula bug in the C reference -- it subtracts
-    // E[f] (mean_freq), not E[f]^2. Do NOT "fix" it: it is load-bearing. The buggy
-    // form makes the `rsd > 1.0` reject gate fire when interval-frequency variance
-    // exceeds the mean frequency (an effective periodicity filter); the correct form
-    // would only reject variance > mean^2 (~never -> gate inert, noise/rumble passes).
-    // Correcting it breaks the C-oracle match (151 -> 7 dB seg-SNR) and worsens rumble
-    // rejection, with no measured benefit, so it is reproduced verbatim.
-    let std_freq = (sum_square_freq / denominator - mean_freq).sqrt();
-    Some((mean_freq, std_freq / mean_freq))
+    // Periodicity gate: reject the candidate when the interval-weighted variance of
+    // the interval frequencies exceeds the mean frequency -- a scale-aware test for
+    // whether the zero-cross intervals are regular enough to be a real pitch period.
+    // (The C reference writes this as a sign-errored std dev, sqrt(E[f^2] - E[f]),
+    // whose rsd > 1 reject is algebraically *exactly* this `variance > mean` gate; we
+    // compute the real variance directly, which is the same gate. The threshold is the
+    // mean, NOT mean^2: a textbook coefficient-of-variation gate (variance > mean^2)
+    // almost never fires and lets rumble/noise through -- measured RPA 72 -> 67,
+    // octave error 3.8 -> 8% -- so the mean is the load-bearing part, not the sqrt.)
+    let variance = sum_square_freq / total_interval - mean_freq * mean_freq;
+    if variance > mean_freq {
+        return None;
+    }
+    Some(mean_freq)
 }
 
 impl FoAnalyzer {
@@ -614,10 +620,10 @@ impl FoAnalyzer {
             fft.inverse(&mut self.filtered_r, &mut self.filtered_i);
 
             let offset = self.channel_offsets[ch];
-            let Some((fo, rsd)) = analyze_fo_with_zerocross(&self.filtered_r[offset..], fs) else {
+            let Some(fo) = analyze_fo_with_zerocross(&self.filtered_r[offset..], fs) else {
                 continue;
             };
-            if fo.is_nan() || fo < fo_floor || fo > fo_ceil || rsd > 1.0 {
+            if fo < fo_floor || fo > fo_ceil {
                 continue;
             }
 
@@ -1525,6 +1531,32 @@ mod tests {
         tail.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let med = tail[tail.len() / 2];
         assert!(approx(med, 200.0, 10.0), "median fo {med} not near 200 Hz");
+    }
+
+    #[test]
+    fn zerocross_periodicity_gate() {
+        // The gate accepts a candidate when interval-frequency variance <= mean, and
+        // rejects otherwise. A steady tone has near-constant intervals (low variance)
+        // and passes; a fast frequency sweep has widely varying intervals (variance
+        // far above the mean) and is rejected. This pins the threshold at the mean,
+        // not mean^2 -- a coefficient-of-variation gate would let the sweep through.
+        let fs = 24000.0;
+        let n = 2048;
+        let tone: Vec<f64> = (0..n).map(|i| (2.0 * std::f64::consts::PI * 200.0 * i as f64 / fs).sin()).collect();
+        let fo = analyze_fo_with_zerocross(&tone, fs).expect("steady tone passes the gate");
+        assert!(approx(fo, 200.0, 5.0), "fo {fo} not near 200 Hz");
+
+        // Half the window at 300 Hz, half at 900 Hz: interval frequencies are bimodal
+        // {300, 900}, mean ~600, variance ~90k. That is > mean (600) so the real gate
+        // rejects, but < mean^2 (360k) so a coefficient-of-variation gate (variance >
+        // mean^2) would wrongly accept it -- this is what pins the threshold at mean.
+        let two_tone: Vec<f64> = (0..n)
+            .map(|i| {
+                let f = if i < n / 2 { 300.0 } else { 900.0 };
+                (2.0 * std::f64::consts::PI * f * i as f64 / fs).sin()
+            })
+            .collect();
+        assert!(analyze_fo_with_zerocross(&two_tone, fs).is_none(), "bimodal signal must fail the variance>mean gate");
     }
 
     #[test]
