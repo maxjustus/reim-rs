@@ -3,6 +3,7 @@
 //!   reim process <in.wav> <out.wav>           analyze + resynthesize a mono WAV
 //!   reim eval <ref.wav> <in.wav> [feat.csv]   compare output against a reference
 //!   reim bench [in.wav]                        throughput + per-stage latency
+//!   reim f0 <in.wav> [fmin] [fmax] [fftsize]   emit the per-frame Fo contour as CSV
 
 use reim::{read_wav, write_wav_f32, Reim};
 
@@ -16,7 +17,8 @@ fn cmd_process(input: &str, output: &str) -> Result<(), String> {
     Ok(())
 }
 
-// Signal and error energy over reference[r]/test[r], summed in order.
+// Returns (signal energy = sum of reference^2, error energy = sum of (reference-test)^2)
+// over `range`, accumulated in index order (fixed summation order for reproducibility).
 fn sig_err(reference: &[f64], test: &[f64], range: std::ops::Range<usize>) -> (f64, f64) {
     let mut sig = 0.0;
     let mut err = 0.0;
@@ -179,6 +181,11 @@ fn cmd_bench(input: Option<&str>) -> Result<(), String> {
 
     let mut lat = p.frame_latencies;
     lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    if lat.is_empty() {
+        println!("== per-frame analysis latency ==");
+        println!("  frames          : 0 (no full frame in input)");
+        return Ok(());
+    }
     let q = |x: f64| lat[((lat.len() as f64 - 1.0) * x) as usize] * 1e6;
     let budget_us = p.period_ms * 1000.0;
     println!("== per-frame analysis latency ==");
@@ -191,7 +198,7 @@ fn cmd_bench(input: Option<&str>) -> Result<(), String> {
 
 // Emit the per-frame Fo contour as CSV: "time_seconds,fo_hz" (fo 0.0 = unvoiced).
 // time is the analysis-window center, so the contour aligns with the audio it
-// describes. fftsize is fixed at 2048 (the default).
+// describes. fftsize defaults to 2048 and can be overridden as the 4th positional arg.
 fn cmd_f0(input: &str, fmin: Option<&str>, fmax: Option<&str>, fftarg: Option<&str>) -> Result<(), String> {
     let fo_floor: f64 = fmin.unwrap_or("71").parse().map_err(|_| "bad fmin")?;
     let fo_ceil: f64 = fmax.unwrap_or("800").parse().map_err(|_| "bad fmax")?;
@@ -222,7 +229,7 @@ fn usage() -> ! {
     eprintln!("  reim process <in.wav> <out.wav>");
     eprintln!("  reim eval <ref.wav> <in.wav> [feat.csv]");
     eprintln!("  reim bench [in.wav]");
-    eprintln!("  reim f0 <in.wav> [fmin] [fmax]");
+    eprintln!("  reim f0 <in.wav> [fmin] [fmax] [fftsize]");
     std::process::exit(2);
 }
 
