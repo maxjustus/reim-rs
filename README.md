@@ -120,12 +120,17 @@ cc -O2 -std=c99 -Ireim/include oracle.c reim/src/*.c \
 ./target/release/reim eval /tmp/ref.wav in.wav /tmp/feat.csv
 ```
 
-Measured against the C oracle, the Rust output matches to the f32 storage noise
-floor (140-151 dB SNR) with 100% per-frame agreement on silence, voiced/unvoiced,
-and Fo (0.0000% relative Fo error), across the bundled 24 kHz voice file and
-synthetic 8/16/44.1 kHz signals with vibrato, noise, and silence. The remaining
-error is the f32 quantization of the reference WAV; the f64 pipelines agree below
-that.
+Measured against the C oracle, the Rust **analysis decisions** match it exactly:
+100% per-frame agreement on silence, voiced/unvoiced, and Fo (0.0000% relative Fo
+error) across the bundled 24 kHz voice file and synthetic 8/16/44.1 kHz signals
+with vibrato, noise, and silence. The Fo and spectral-envelope paths reproduce the
+C to the f32 storage noise floor (140-151 dB SNR).
+
+The **synthesized waveform** no longer matches the C bit-for-bit: ReIm computes
+real D4C band-aperiodicity where the C reference leaves aperiodicity a binary
+placeholder, so the output diverges by design (the per-frame decisions above are
+unaffected — voicing is decided before aperiodicity). `tests/snapshot.rs` guards
+the synthesized output against a frozen reim golden instead of the C oracle.
 
 ## Pitch (Fo) accuracy
 
