@@ -29,7 +29,7 @@ The whole API is the `Reim` type: construct it once, then push samples through
 
 ```rust
 // Offline / block: analyze + resynthesize a buffer.
-let mut reim = Reim::with_defaults(48_000.0); // fs; period 5 ms, fftsize 2048, fo 71-800 Hz
+let mut reim = Reim::with_defaults(48_000.0); // fs; period 5 ms, fftsize 1024-2048 by fs, fo 71-800 Hz
 let mut out = vec![0.0; input.len()];
 reim.process_block(&input, &mut out);         // output slice is caller-owned; no allocation
 ```
@@ -67,6 +67,26 @@ time regardless (see Performance).
 cargo build --release
 cargo test --release
 cargo clippy --all-targets --release   # clean (lints tests too)
+```
+
+`tests/snapshot.rs` freezes the analysis->synthesis waveform against a committed
+golden (compared by SNR). The C oracle stays the reference for the analysis
+decisions; this guards the synthesized output, which will diverge from the C once
+aperiodicity becomes more than a placeholder. Regenerate after an intended change:
+`REGEN_SNAPSHOT=1 cargo test --release --test snapshot`.
+
+## Evaluation
+
+Accuracy/fidelity scripts live in `eval/` (Python via `uv`, run from the repo root).
+Each runs a synthetic self-test and falls back to it when the dataset is absent:
+
+- `eval/pitch_rpa.py` -- sung-pitch accuracy (RPA/RCA, voicing P/R/F1) of `reim f0`
+  against the [Vocadito](https://zenodo.org/records/5578807) ground truth, via `mir_eval`.
+- `eval/roundtrip_quality.py` -- analysis->synthesis fidelity (mel-cepstral distortion
+  and log-spectral distance, which are phase-invariant since the vocoder regenerates phase).
+
+```
+uv run --no-project --with numpy --with soundfile --with mir_eval python eval/pitch_rpa.py --self-test
 ```
 
 ## CLI
@@ -145,11 +165,11 @@ On real speech the picture is more sober. Run through the independent
 SpeechSynth set (219 TTS clips, 65-300 Hz, 16 kHz), using that project's own
 algorithm wrappers and metrics, ReIm scores RPA 72% -- on par with WORLD's own
 DIO/Harvest (72%/72%), behind pYIN (78%) and Praat (79%), and with a higher
-gross/octave-error rate (6.0%/4.2% vs ~0.5-3%). About half that gap is the fixed
+gross/octave-error rate (6.0%/4.2% vs ~0.5-3%). About half that gap was the fixed
 analysis window: 2048 points is 128 ms at 16 kHz, far too long for low-pitch
 speech, and shrinking it to 1024 (64 ms) roughly halves gross/octave errors at no
-RPA cost. ReIm's defaults target 24-48 kHz real-time vocoding rather than 16 kHz
-speech pitch extraction, so this is somewhat out of its envelope; the synthetic
+RPA cost. `with_defaults` now picks the fftsize from the sample rate (1024 at
+16 kHz, 2048 at 24-48 kHz), so this case is handled automatically; the synthetic
 tones above (where it beat YIN) were too favorable. Learned models (CREPE,
 SwiftF0, RMVPE) lead that benchmark and were not run here.
 

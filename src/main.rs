@@ -5,7 +5,7 @@
 //!   reim bench [in.wav]                        throughput + per-stage latency
 //!   reim f0 <in.wav> [fmin] [fmax] [fftsize]   emit the per-frame Fo contour as CSV
 
-use reim::{read_wav, write_wav_f32, Reim};
+use reim::{default_fftsize, read_wav, write_wav_f32, Reim};
 
 fn cmd_process(input: &str, output: &str) -> Result<(), String> {
     let wav = read_wav(input)?;
@@ -198,13 +198,17 @@ fn cmd_bench(input: Option<&str>) -> Result<(), String> {
 
 // Emit the per-frame Fo contour as CSV: "time_seconds,fo_hz" (fo 0.0 = unvoiced).
 // time is the analysis-window center, so the contour aligns with the audio it
-// describes. fftsize defaults to 2048 and can be overridden as the 4th positional arg.
+// describes. fftsize defaults to the sample-rate-aware default (1024 at 16 kHz,
+// 2048 at 24-48 kHz) and can be overridden as the 4th positional arg.
 fn cmd_f0(input: &str, fmin: Option<&str>, fmax: Option<&str>, fftarg: Option<&str>) -> Result<(), String> {
     let fo_floor: f64 = fmin.unwrap_or("71").parse().map_err(|_| "bad fmin")?;
     let fo_ceil: f64 = fmax.unwrap_or("800").parse().map_err(|_| "bad fmax")?;
-    let fftsize: usize = fftarg.unwrap_or("2048").parse().map_err(|_| "bad fftsize")?;
     let wav = read_wav(input)?;
     let fs = wav.sample_rate as f64;
+    let fftsize: usize = match fftarg {
+        Some(s) => s.parse().map_err(|_| "bad fftsize")?,
+        None => default_fftsize(fs, fo_floor),
+    };
     let mut reim = Reim::new(fs, 5.0, fftsize, fo_floor, fo_ceil);
     let half = fftsize as f64 / 2.0;
     let mut last = 0u64;

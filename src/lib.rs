@@ -1092,6 +1092,17 @@ pub struct Reim {
     frame_count: u64,
 }
 
+/// Default analysis size used by [`Reim::with_defaults`] and the `reim f0` CLI:
+/// the smallest power of two spanning ~4 periods of `fo_floor` (the resolution
+/// the Fo tracker needs), clamped to [512, 2048]. This keeps the window near a
+/// fixed *time* span across sample rates -- 1024 at 16 kHz (64 ms), 2048 at
+/// 24-48 kHz -- rather than a fixed 2048 that is 128 ms at 16 kHz and smears
+/// fast pitch motion.
+pub fn default_fftsize(fs: f64, fo_floor: f64) -> usize {
+    let needed = (4.0 * fs / fo_floor).ceil() as usize;
+    needed.next_power_of_two().clamp(512, 2048)
+}
+
 impl Reim {
     pub fn new(fs: f64, period: f64, fftsize: usize, fo_floor: f64, fo_ceil: f64) -> Self {
         let cfg = Config::new(period, fftsize, fo_floor, fo_ceil, fs);
@@ -1118,9 +1129,11 @@ impl Reim {
         }
     }
 
-    /// Default configuration matching the reference example.
+    /// Default configuration: 5 ms period, Fo 71-800 Hz, and a sample-rate-aware
+    /// fftsize (see [`default_fftsize`]) -- 1024 at 16 kHz, 2048 at 24-48 kHz.
     pub fn with_defaults(fs: f64) -> Self {
-        Reim::new(fs, 5.0, 2048, 71.0, 800.0)
+        let fo_floor = 71.0;
+        Reim::new(fs, 5.0, default_fftsize(fs, fo_floor), fo_floor, 800.0)
     }
 
     /// Process one input sample, returning one output sample. Allocation-free.
@@ -1480,6 +1493,17 @@ mod tests {
         }
         // framesize = 5/1000*24000 = 120 -> frames at 0,120,240,360,480
         assert_eq!(boundaries, vec![0, 120, 240, 360, 480]);
+    }
+
+    #[test]
+    fn default_fftsize_adapts_to_sample_rate() {
+        // 16 kHz drops to 1024 (the documented benchmark win); 24-48 kHz stay 2048
+        // so the bundled-file oracle and the latency story are unchanged.
+        assert_eq!(default_fftsize(16000.0, 71.0), 1024);
+        assert_eq!(default_fftsize(24000.0, 71.0), 2048);
+        assert_eq!(default_fftsize(44100.0, 71.0), 2048);
+        assert_eq!(default_fftsize(48000.0, 71.0), 2048);
+        assert_eq!(default_fftsize(8000.0, 71.0), 512); // clamped floor
     }
 
     #[test]
