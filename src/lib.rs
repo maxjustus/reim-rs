@@ -1507,14 +1507,16 @@ impl Synth {
 // Top-level real-time processor
 // ============================================================================
 
-pub struct Reim {
+/// Streaming analyzer: framer + Fo/Ap/Sp analyzers and their per-frame buffers.
+/// Push input samples; on each frame boundary the per-frame WORLD parameters
+/// become readable via the accessors. Allocation-free steady state.
+pub struct Analyzer {
     cfg: Config,
     fft: Fft,
     framer: Framer,
     fo: FoAnalyzer,
     ap: ApAnalyzer,
     sp: SpAnalyzer,
-    syn: Synth,
     frame_window: Vec<f64>, // fftsize+1 samples, oldest..newest
     ap_buf: Vec<f64>, // numbins
     sp_buf: Vec<f64>, // numbins
@@ -1522,6 +1524,22 @@ pub struct Reim {
     last_voiced: bool,
     last_silence: bool,
     frame_count: u64,
+}
+
+/// Synthesizer: minimum-phase pulse + velvet-noise overlap-add from per-frame
+/// WORLD parameters. Feed it one frame's parameters per frame boundary
+/// (`push_frame`) and pull one output sample per input sample (`next_sample`).
+pub struct Synthesizer {
+    cfg: Config,
+    fft: Fft,
+    syn: Synth,
+}
+
+/// Fused analyze->resynthesize convenience: composes [`Analyzer`] +
+/// [`Synthesizer`] and preserves the original one-in/one-out API.
+pub struct Reim {
+    analyzer: Analyzer,
+    synth: Synthesizer,
 }
 
 /// Default analysis size used by [`Reim::with_defaults`] and the `reim f0` CLI:
@@ -1535,22 +1553,20 @@ pub fn default_fftsize(fs: f64, fo_floor: f64) -> usize {
     needed.next_power_of_two().clamp(512, 2048)
 }
 
-impl Reim {
+impl Analyzer {
     pub fn new(fs: f64, period: f64, fftsize: usize, fo_floor: f64, fo_ceil: f64) -> Self {
         let cfg = Config::new(period, fftsize, fo_floor, fo_ceil, fs);
         let fft = Fft::new(fftsize);
         let fo = FoAnalyzer::new(&cfg, &fft);
         let ap = ApAnalyzer::new(&cfg);
         let sp = SpAnalyzer::new(&cfg);
-        let syn = Synth::new(&cfg);
-        Reim {
+        Analyzer {
             cfg,
             fft,
             framer: Framer::new(&cfg),
             fo,
             ap,
             sp,
-            syn,
             frame_window: vec![0.0; fftsize + 1],
             ap_buf: vec![0.0; cfg.numbins],
             sp_buf: vec![0.0; cfg.numbins],
@@ -1565,7 +1581,7 @@ impl Reim {
     /// fftsize (see [`default_fftsize`]) -- 1024 at 16 kHz, 2048 at 24-48 kHz.
     pub fn with_defaults(fs: f64) -> Self {
         let fo_floor = 71.0;
-        Reim::new(fs, 5.0, default_fftsize(fs, fo_floor), fo_floor, 800.0)
+        Analyzer::new(fs, 5.0, default_fftsize(fs, fo_floor), fo_floor, 800.0)
     }
 
     /// Analyze the current frame window into the per-frame parameters/state
@@ -1584,12 +1600,10 @@ impl Reim {
         self.frame_count += 1;
     }
 
-    /// Analyze one input sample WITHOUT synthesizing. Returns true when a new
-    /// analysis frame is ready; read it via `last_fo`/`last_voiced`/
-    /// `last_silence`/`last_aperiodicity`/`last_spectral_envelope`. Use this for
-    /// real-time analysis when you supply your own synthesis — it skips the
-    /// synthesis cost entirely. Allocation-free.
-    pub fn analyze_sample(&mut self, input: f64) -> bool {
+    /// Push one input sample. Returns true when a new analysis frame is ready;
+    /// the accessors below are then valid until the next push that returns true.
+    /// Allocation-free.
+    pub fn push_sample(&mut self, input: f64) -> bool {
         let new_frame = self.framer.next(input, &mut self.frame_window);
         if new_frame {
             self.analyze_current_frame();
@@ -1597,14 +1611,128 @@ impl Reim {
         new_frame
     }
 
+    /// Number of frames analyzed so far.
+    pub fn frame_count(&self) -> u64 {
+        self.frame_count
+    }
+    /// Number of frequency bins in the spectral envelope / aperiodicity
+    /// (`fftsize/2 + 1`).
+    pub fn numbins(&self) -> usize {
+        self.cfg.numbins
+    }
+    /// Pitch-tracker estimate for the most recent frame, in Hz (0.0 when the
+    /// tracker found no periodicity). This is the raw Fo and is independent of
+    /// the voicing decision: it can be nonzero on a frame `voiced()` rejects
+    /// (e.g. rumble the voicing guard discards). Gate on `voiced()` if you only
+    /// want pitch for frames judged to carry voice.
+    pub fn fo(&self) -> f64 {
+        self.last_fo
+    }
+    /// Whether the most recent frame was judged voiced. This is the full
+    /// voiced/unvoiced decision, separate from the pitch tracker (`fo()`): a
+    /// frame is voiced only when it is not silence, its Fo lies in
+    /// `[fo_floor, fo_ceil]`, its energy is not dominated by sub-fundamental
+    /// rumble/hum, and it passes the D4C band-energy ratio.
+    pub fn voiced(&self) -> bool {
+        self.last_voiced
+    }
+    /// Whether the most recent frame was silence.
+    pub fn silence(&self) -> bool {
+        self.last_silence
+    }
+    /// Per-bin aperiodicity for the most recent frame (length `numbins`): the
+    /// noise-to-total energy ratio per frequency bin, ~0 = periodic,
+    /// ~1 = fully aperiodic.
+    pub fn aperiodicity(&self) -> &[f64] {
+        &self.ap_buf
+    }
+    /// Per-bin spectral envelope (CheapTrick) for the most recent frame (length
+    /// `numbins`): the smoothed power spectrum carrying the formant structure.
+    /// With `fo`/`voiced`/`aperiodicity` this is the full per-frame WORLD
+    /// parameter set (read it after each `push_sample` that returns true).
+    pub fn spectral_envelope(&self) -> &[f64] {
+        &self.sp_buf
+    }
+    /// Set the minimum SRH harmonic score for a frame to be judged voiced
+    /// (default 0.0 = off). Above 0 this is an opt-in, EXPERIMENTAL periodicity
+    /// gate: the Fo tracker returns a candidate even on breath/noise, and true
+    /// voiced frames score orders of magnitude higher, so a threshold (~1e3 on
+    /// Vocadito) cuts voicing false alarms sharply. Tradeoff: it also rejects
+    /// some soft/decaying true-voiced frames. See `plans/merge-d4c-and-vfa.md`
+    /// and the README "Voicing" section.
+    pub fn set_voicing_score_min(&mut self, min: f64) {
+        self.ap.score_min = min;
+    }
+}
+
+impl Synthesizer {
+    pub fn new(fs: f64, period: f64, fftsize: usize, fo_floor: f64, fo_ceil: f64) -> Self {
+        let cfg = Config::new(period, fftsize, fo_floor, fo_ceil, fs);
+        let fft = Fft::new(fftsize);
+        let syn = Synth::new(&cfg);
+        Synthesizer { cfg, fft, syn }
+    }
+
+    /// Default configuration: 5 ms period, Fo 71-800 Hz, and a sample-rate-aware
+    /// fftsize (see [`default_fftsize`]).
+    pub fn with_defaults(fs: f64) -> Self {
+        let fo_floor = 71.0;
+        Synthesizer::new(fs, 5.0, default_fftsize(fs, fo_floor), fo_floor, 800.0)
+    }
+
+    /// Supply the next frame's parameters (call once per frame boundary).
+    /// `aperiodicity` and `spectral_envelope` must each be `numbins` long.
+    /// Allocation-free.
+    pub fn push_frame(&mut self, fo: f64, voiced: bool, silence: bool, aperiodicity: &[f64], spectral_envelope: &[f64]) {
+        self.syn.new_frame(&self.cfg, &self.fft, fo, voiced, silence, aperiodicity, spectral_envelope);
+    }
+
+    /// Produce one output sample (overlap-add). Call once per input sample.
+    /// Allocation-free.
+    pub fn next_sample(&mut self) -> f64 {
+        self.syn.next_sample(&self.cfg, &self.fft)
+    }
+}
+
+impl Reim {
+    pub fn new(fs: f64, period: f64, fftsize: usize, fo_floor: f64, fo_ceil: f64) -> Self {
+        Reim {
+            analyzer: Analyzer::new(fs, period, fftsize, fo_floor, fo_ceil),
+            synth: Synthesizer::new(fs, period, fftsize, fo_floor, fo_ceil),
+        }
+    }
+
+    /// Default configuration: 5 ms period, Fo 71-800 Hz, and a sample-rate-aware
+    /// fftsize (see [`default_fftsize`]) -- 1024 at 16 kHz, 2048 at 24-48 kHz.
+    pub fn with_defaults(fs: f64) -> Self {
+        Reim {
+            analyzer: Analyzer::with_defaults(fs),
+            synth: Synthesizer::with_defaults(fs),
+        }
+    }
+
+    /// Analyze one input sample WITHOUT synthesizing. Returns true when a new
+    /// analysis frame is ready; read it via `last_fo`/`last_voiced`/
+    /// `last_silence`/`last_aperiodicity`/`last_spectral_envelope`. Use this for
+    /// real-time analysis when you supply your own synthesis -- it skips the
+    /// synthesis cost entirely. Allocation-free.
+    pub fn analyze_sample(&mut self, input: f64) -> bool {
+        self.analyzer.push_sample(input)
+    }
+
     /// Process one input sample, returning one output sample (analysis +
     /// synthesis). Allocation-free.
     pub fn process_sample(&mut self, input: f64) -> f64 {
-        if self.framer.next(input, &mut self.frame_window) {
-            self.analyze_current_frame();
-            self.syn.new_frame(&self.cfg, &self.fft, self.last_fo, self.last_voiced, self.last_silence, &self.ap_buf, &self.sp_buf);
+        if self.analyzer.push_sample(input) {
+            self.synth.push_frame(
+                self.analyzer.fo(),
+                self.analyzer.voiced(),
+                self.analyzer.silence(),
+                self.analyzer.aperiodicity(),
+                self.analyzer.spectral_envelope(),
+            );
         }
-        self.syn.next_sample(&self.cfg, &self.fft)
+        self.synth.next_sample()
     }
 
     /// Run `process_sample` over `input`, writing each result into `output`;
@@ -1617,33 +1745,26 @@ impl Reim {
 
     /// Number of frames analyzed so far.
     pub fn frame_count(&self) -> u64 {
-        self.frame_count
+        self.analyzer.frame_count()
     }
     /// Pitch-tracker estimate for the most recent frame, in Hz (0.0 when the
-    /// tracker found no periodicity). This is the raw Fo and is independent of
-    /// the voicing decision: it can be nonzero on a frame `last_voiced()`
-    /// rejects (e.g. rumble the voicing guard discards). Gate on `last_voiced()`
-    /// if you only want pitch for frames judged to carry voice.
+    /// tracker found no periodicity). See [`Analyzer::fo`].
     pub fn last_fo(&self) -> f64 {
-        self.last_fo
+        self.analyzer.fo()
     }
-    /// Whether the most recent frame was judged voiced. This is the full
-    /// voiced/unvoiced decision, separate from the pitch tracker (`last_fo()`):
-    /// a frame is voiced only when it is not silence, its Fo lies in
-    /// `[fo_floor, fo_ceil]`, its energy is not dominated by sub-fundamental
-    /// rumble/hum, and it passes the D4C band-energy ratio.
+    /// Whether the most recent frame was judged voiced. See [`Analyzer::voiced`].
     pub fn last_voiced(&self) -> bool {
-        self.last_voiced
+        self.analyzer.voiced()
     }
     /// Whether the most recent frame was silence.
     pub fn last_silence(&self) -> bool {
-        self.last_silence
+        self.analyzer.silence()
     }
     /// Per-bin aperiodicity for the most recent frame (length `fftsize/2 + 1`):
     /// the noise-to-total energy ratio per frequency bin, ~0 = periodic,
     /// ~1 = fully aperiodic.
     pub fn last_aperiodicity(&self) -> &[f64] {
-        &self.ap_buf
+        self.analyzer.aperiodicity()
     }
     /// Per-bin spectral envelope (CheapTrick) for the most recent frame, length
     /// `fftsize/2 + 1`: the smoothed power spectrum carrying the formant
@@ -1651,17 +1772,12 @@ impl Reim {
     /// full per-frame WORLD parameter set (read it after each `process_sample`
     /// that advances `frame_count`).
     pub fn last_spectral_envelope(&self) -> &[f64] {
-        &self.sp_buf
+        self.analyzer.spectral_envelope()
     }
     /// Set the minimum SRH harmonic score for a frame to be judged voiced
-    /// (default 0.0 = off). Above 0 this is an opt-in, EXPERIMENTAL periodicity
-    /// gate: the Fo tracker returns a candidate even on breath/noise, and true
-    /// voiced frames score orders of magnitude higher, so a threshold (~1e3 on
-    /// Vocadito) cuts voicing false alarms sharply. Tradeoff: it also rejects
-    /// some soft/decaying true-voiced frames. See `plans/merge-d4c-and-vfa.md`
-    /// and the README "Voicing" section.
+    /// (default 0.0 = off). See [`Analyzer::set_voicing_score_min`].
     pub fn set_voicing_score_min(&mut self, min: f64) {
-        self.ap.score_min = min;
+        self.analyzer.set_voicing_score_min(min);
     }
 }
 
@@ -1782,33 +1898,34 @@ impl Reim {
 
         // instrumented pass: drive the internals with per-stage timers
         let mut r = Reim::with_defaults(fs);
-        let cfg = r.cfg;
+        let cfg = r.analyzer.cfg;
         let fftsize = cfg.fftsize;
         let (mut t_sil, mut t_fo, mut t_ap, mut t_sp, mut t_nf, mut t_ns) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         let mut frame_latencies = Vec::new();
         for &x in samples {
-            if r.framer.next(x, &mut r.frame_window) {
+            let Reim { analyzer, synth } = &mut r;
+            if analyzer.framer.next(x, &mut analyzer.frame_window) {
                 let frame_t0 = Instant::now();
-                let (wave_d, wave) = (&r.frame_window[..fftsize], &r.frame_window[1..fftsize + 1]);
+                let (wave_d, wave) = (&analyzer.frame_window[..fftsize], &analyzer.frame_window[1..fftsize + 1]);
                 let t = Instant::now();
                 let silence = analyze_silence(&cfg, wave, SILENCE_THRESHOLD);
                 t_sil += t.elapsed().as_secs_f64();
                 let t = Instant::now();
-                let fo = r.fo.analyze(&cfg, &r.fft, wave, wave_d);
+                let fo = analyzer.fo.analyze(&cfg, &analyzer.fft, wave, wave_d);
                 t_fo += t.elapsed().as_secs_f64();
                 let t = Instant::now();
-                let voiced = r.ap.analyze(&cfg, &r.fft, wave, fo, r.fo.last_score, silence, &mut r.ap_buf);
+                let voiced = analyzer.ap.analyze(&cfg, &analyzer.fft, wave, fo, analyzer.fo.last_score, silence, &mut analyzer.ap_buf);
                 t_ap += t.elapsed().as_secs_f64();
                 let t = Instant::now();
-                r.sp.analyze(&cfg, &r.fft, wave, fo, voiced, silence, &mut r.sp_buf);
+                analyzer.sp.analyze(&cfg, &analyzer.fft, wave, fo, voiced, silence, &mut analyzer.sp_buf);
                 t_sp += t.elapsed().as_secs_f64();
                 let t = Instant::now();
-                r.syn.new_frame(&cfg, &r.fft, fo, voiced, silence, &r.ap_buf, &r.sp_buf);
+                synth.syn.new_frame(&synth.cfg, &synth.fft, fo, voiced, silence, &analyzer.ap_buf, &analyzer.sp_buf);
                 t_nf += t.elapsed().as_secs_f64();
                 frame_latencies.push(frame_t0.elapsed().as_secs_f64());
             }
             let t = Instant::now();
-            let _ = r.syn.next_sample(&cfg, &r.fft);
+            let _ = synth.syn.next_sample(&synth.cfg, &synth.fft);
             t_ns += t.elapsed().as_secs_f64();
         }
 
@@ -2018,10 +2135,10 @@ mod tests {
         let mut fos = Vec::new();
         for &x in &input {
             r.process_sample(x);
-            if r.frame_count != last {
-                last = r.frame_count;
-                if r.last_fo > 0.0 {
-                    fos.push(r.last_fo);
+            if r.frame_count() != last {
+                last = r.frame_count();
+                if r.last_fo() > 0.0 {
+                    fos.push(r.last_fo());
                 }
             }
         }
@@ -2135,5 +2252,30 @@ mod tests {
         assert_eq!(a.last_silence(), b.last_silence());
         assert_eq!(a.last_spectral_envelope(), b.last_spectral_envelope());
         assert_eq!(a.last_aperiodicity(), b.last_aperiodicity());
+    }
+
+    #[test]
+    fn analyzer_synthesizer_compose_equals_reim() {
+        // Driving Analyzer + Synthesizer by hand (the manipulate->resynthesize
+        // path with no manipulation) must equal Reim::process_block sample for
+        // sample -- the composition is the only behavior Reim adds.
+        let fs = 24000.0;
+        let n = (fs * 0.4) as usize;
+        let input: Vec<f64> = (0..n).map(|i| 0.5 * (2.0 * std::f64::consts::PI * 190.0 * i as f64 / fs).sin()).collect();
+
+        let mut reim = Reim::with_defaults(fs);
+        let mut fused = vec![0.0; input.len()];
+        reim.process_block(&input, &mut fused);
+
+        let mut analyzer = Analyzer::with_defaults(fs);
+        let mut synth = Synthesizer::with_defaults(fs);
+        let mut split = Vec::with_capacity(input.len());
+        for &x in &input {
+            if analyzer.push_sample(x) {
+                synth.push_frame(analyzer.fo(), analyzer.voiced(), analyzer.silence(), analyzer.aperiodicity(), analyzer.spectral_envelope());
+            }
+            split.push(synth.next_sample());
+        }
+        assert_eq!(fused, split, "Analyzer+Synthesizer must match Reim sample-for-sample");
     }
 }

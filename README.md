@@ -62,27 +62,50 @@ for (out_sample, &in_sample) in output.iter_mut().zip(input) {
 ### Reading the per-frame analysis parameters
 
 For analysis without synthesis — real-time parameter extraction when you supply
-your own synthesizer — use `analyze_sample`, which skips the synthesis cost. It
-returns `true` when a new analysis frame is ready; read the full WORLD parameter
-set from the accessors:
+your own synthesizer — use the standalone `Analyzer`. `push_sample` returns
+`true` when a new analysis frame is ready; read the full WORLD parameter set
+from the accessors. No synth runs.
 
 ```rust
-let mut reim = Reim::with_defaults(48_000.0);
+use reim::Analyzer;
+let mut a = Analyzer::with_defaults(48_000.0);
 for &x in &input {
-    if reim.analyze_sample(x) {                        // analysis only, no synthesis
-        let f0       = reim.last_fo();                 // Hz, 0.0 = unvoiced
-        let voiced   = reim.last_voiced();
-        let envelope = reim.last_spectral_envelope();  // &[f64], len fftsize/2 + 1 (formants)
-        let aperiod  = reim.last_aperiodicity();       // &[f64], same length (D4C)
+    if a.push_sample(x) {                 // true once per analysis frame
+        let f0  = a.fo();                 // Hz, 0.0 = unvoiced
+        let env = a.spectral_envelope();  // &[f64], len fftsize/2 + 1 (formants)
+        let ap  = a.aperiodicity();       // &[f64], same length (D4C)
+        let v   = a.voiced();
         // ... feed your own synthesis / feature pipeline
     }
 }
 ```
 
-`process_sample` remains the one-call analyze + resynthesize path. A planned
-refactor additionally exposes a reusable `Synthesizer` so the parameters can be
-manipulated (e.g. formant shifting) and fed back to ReIm's own synth — see
-`plans/analysis-synthesis-decoupling.md`.
+(`Reim::analyze_sample` is the same analysis-only path on the fused type, kept
+for callers already holding a `Reim`.)
+
+### Manipulate then resynthesize
+
+Pair `Analyzer` with the standalone `Synthesizer` to edit the parameters between
+analysis and synthesis. A frequency-axis warp of the spectral envelope is a
+formant shift; Fo and aperiodicity are untouched, so the pitch is preserved. See
+`examples/formant_shift.rs` for the runnable version (`warp_formants` shown there).
+
+```rust
+use reim::{Analyzer, Synthesizer};
+let mut a = Analyzer::with_defaults(fs);
+let mut s = Synthesizer::with_defaults(fs);
+let mut sp = vec![0.0; a.numbins()];
+for &x in &input {
+    if a.push_sample(x) {
+        warp_formants(a.spectral_envelope(), 1.15, &mut sp); // +15% formant shift
+        s.push_frame(a.fo(), a.voiced(), a.silence(), a.aperiodicity(), &sp);
+    }
+    out.push(s.next_sample());            // pitch preserved, formants shifted
+}
+```
+
+`Reim::process_sample` remains the one-call analyze + resynthesize convenience;
+it is now just `Analyzer` + `Synthesizer` composed.
 
 Latency note: input->output latency is dominated by `fftsize`. Its floor is the
 `fftsize/2`-sample synthesis group delay; measured end-to-end it is ≈49 ms at
