@@ -14,10 +14,13 @@ CLI over it. Add the crate as a dependency and `use reim::Reim`, or run the
 - Allocation-free steady state: `Reim::process_sample` does no heap allocation;
   all working buffers are owned by the analyzer/synthesizer state and reused.
 - Self-contained: hand-written radix-2 FFT, xorshift RNG, and WAV I/O.
-- Faithful to the C reference: ported function by function. Two deliberate
-  deviations from the C are documented in the source — the silence RMS skips a
-  one-element out-of-bounds read present in the C, and the Ap range guard mirrors
-  the C's exact branch semantics (including NaN handling).
+- Faithful to the C reference: ported function by function and matched to the f32
+  noise floor against a C oracle. Three places deviate from the C in source while
+  keeping its output: the silence RMS skips a one-element out-of-bounds read
+  present in the C; the Ap range guard mirrors the C's exact branch semantics
+  (including NaN handling); and the Fo periodicity gate computes a real variance
+  instead of the C's std-dev formula (which has a sign error but yields the same
+  gate). All three are documented in the source.
 
 ## Use as a library
 
@@ -63,7 +66,7 @@ time regardless (see Performance).
 ```
 cargo build --release
 cargo test --release
-cargo clippy --release        # clean
+cargo clippy --all-targets --release   # clean (lints tests too)
 ```
 
 ## CLI
