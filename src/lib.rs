@@ -148,16 +148,21 @@ impl Xorshift {
 
 struct Fft {
     n: usize,
-    rev: Vec<usize>,  // bit-reversal permutation
-    cos: Vec<f64>,    // cos(2*pi*t/n), t in 0..n/2
-    sin: Vec<f64>,    // sin(2*pi*t/n), t in 0..n/2
+    rev: Vec<usize>, // bit-reversal permutation
+    cos: Vec<f64>,   // cos(2*pi*t/n), t in 0..n/2
+    sin: Vec<f64>,   // sin(2*pi*t/n), t in 0..n/2
 }
 
 impl Fft {
     fn new(n: usize) -> Self {
-        assert!(n.is_power_of_two() && n >= 2, "fft size must be a power of two");
+        assert!(
+            n.is_power_of_two() && n >= 2,
+            "fft size must be a power of two"
+        );
         let bits = n.trailing_zeros();
-        let rev = (0..n).map(|i| ((i as u32).reverse_bits() >> (32 - bits)) as usize).collect();
+        let rev = (0..n)
+            .map(|i| ((i as u32).reverse_bits() >> (32 - bits)) as usize)
+            .collect();
         let half = n / 2;
         let mut cos = vec![0.0; half];
         let mut sin = vec![0.0; half];
@@ -192,7 +197,11 @@ impl Fft {
                 let mut tdx = 0;
                 for k in 0..half {
                     let wr = self.cos[tdx];
-                    let wi = if inverse { self.sin[tdx] } else { -self.sin[tdx] };
+                    let wi = if inverse {
+                        self.sin[tdx]
+                    } else {
+                        -self.sin[tdx]
+                    };
                     let a = start + k;
                     let b = a + half;
                     let xr = re[b] * wr - im[b] * wi;
@@ -247,7 +256,10 @@ struct CircularBuffer {
 
 impl CircularBuffer {
     fn new(capacity: usize) -> Self {
-        CircularBuffer { head: 0, buf: vec![0.0; capacity] }
+        CircularBuffer {
+            head: 0,
+            buf: vec![0.0; capacity],
+        }
     }
     fn push(&mut self, value: f64) {
         self.head = wrap_next(self.head, self.buf.len());
@@ -273,7 +285,11 @@ struct CircularQueue {
 
 impl CircularQueue {
     fn new(capacity: usize) -> Self {
-        CircularQueue { head: 0, remaining: 0, buf: vec![0.0; capacity] }
+        CircularQueue {
+            head: 0,
+            remaining: 0,
+            buf: vec![0.0; capacity],
+        }
     }
     /// Add `samples` into the queue starting at the current head (overlap-add).
     fn push_additive(&mut self, samples: &[f64]) {
@@ -321,7 +337,14 @@ impl Config {
     fn new(period: f64, fftsize: usize, fo_floor: f64, fo_ceil: f64, fs: f64) -> Self {
         assert!(fftsize.is_power_of_two());
         assert!(fo_floor > 0.0 && fo_floor < fo_ceil && fo_ceil < fs / 2.0 && fs > 0.0);
-        Config { period, fs, fo_floor, fo_ceil, fftsize, numbins: fftsize / 2 + 1 }
+        Config {
+            period,
+            fs,
+            fo_floor,
+            fo_ceil,
+            fftsize,
+            numbins: fftsize / 2 + 1,
+        }
     }
 }
 
@@ -388,7 +411,7 @@ fn analyze_silence(cfg: &Config, input: &[f64], threshold: f64) -> bool {
 
 struct FoAnalyzer {
     num_candidates: usize,
-    channel_filters: Vec<f64>,  // [ch*fftsize + k]
+    channel_filters: Vec<f64>, // [ch*fftsize + k]
     channel_offsets: Vec<usize>,
     window: Vec<f64>,
     spec_r: Vec<f64>,
@@ -412,7 +435,15 @@ fn get_interpolated_spectrum(freq: f64, fs: f64, spec: &[f64], numbins: usize) -
     (1.0 - delta) * spec[index] + delta * spec[index + 1]
 }
 
-fn refine_fo(fo: f64, fo_floor: f64, fo_ceil: f64, fs: f64, ifreqf: &[f64], pspec: &[f64], numbins: usize) -> f64 {
+fn refine_fo(
+    fo: f64,
+    fo_floor: f64,
+    fo_ceil: f64,
+    fs: f64,
+    ifreqf: &[f64],
+    pspec: &[f64],
+    numbins: usize,
+) -> f64 {
     let harmonics = 3;
     let mut sum_freq = 0.0;
     let mut denominator = 0.0;
@@ -526,7 +557,8 @@ impl FoAnalyzer {
         let numbins = cfg.numbins;
 
         let channels_per_octave = 2.0;
-        let num_candidates = ((cfg.fo_ceil / cfg.fo_floor).log2() * channels_per_octave).ceil() as usize;
+        let num_candidates =
+            ((cfg.fo_ceil / cfg.fo_floor).log2() * channels_per_octave).ceil() as usize;
 
         let mut channel_filters = vec![0.0; num_candidates * fftsize];
         let mut channel_offsets = vec![0usize; num_candidates];
@@ -547,7 +579,9 @@ impl FoAnalyzer {
         }
 
         let window_length = (4.0 * fs / cfg.fo_floor).min(fftsize as f64);
-        let window = (0..fftsize).map(|k| nuttall_window(k as f64, fftsize as f64, window_length)).collect();
+        let window = (0..fftsize)
+            .map(|k| nuttall_window(k as f64, fftsize as f64, window_length))
+            .collect();
 
         FoAnalyzer {
             num_candidates,
@@ -588,7 +622,13 @@ impl FoAnalyzer {
 
         for k in 0..numbins {
             self.pspec[k] = complex_abs2(self.spec_r[k], self.spec_i[k]) + 1e-15;
-            self.ifreqf[k] = instfreq(self.spec_r[k], self.spec_i[k], self.specd_r[k], self.specd_i[k], fs);
+            self.ifreqf[k] = instfreq(
+                self.spec_r[k],
+                self.spec_i[k],
+                self.specd_r[k],
+                self.specd_i[k],
+                fs,
+            );
         }
 
         // spectrum of the DC-removed frame (for band-pass filtering)
@@ -607,7 +647,15 @@ impl FoAnalyzer {
         let mut best_fo = -1.0;
         let mut best_score = -1.0;
         if self.fo_previous > fo_floor {
-            best_fo = refine_fo(self.fo_previous, fo_floor, fo_ceil, fs, &self.ifreqf, &self.pspec, numbins);
+            best_fo = refine_fo(
+                self.fo_previous,
+                fo_floor,
+                fo_ceil,
+                fs,
+                &self.ifreqf,
+                &self.pspec,
+                numbins,
+            );
             best_score = get_harmonic_score(best_fo, fs, &self.pspec, numbins);
         }
 
@@ -629,7 +677,15 @@ impl FoAnalyzer {
                 continue;
             }
 
-            let fo_refined = refine_fo(fo, fo_floor, fo_ceil, fs, &self.ifreqf, &self.pspec, numbins);
+            let fo_refined = refine_fo(
+                fo,
+                fo_floor,
+                fo_ceil,
+                fs,
+                &self.ifreqf,
+                &self.pspec,
+                numbins,
+            );
             let score = get_harmonic_score(fo_refined, fs, &self.pspec, numbins);
             if best_score < score {
                 best_fo = fo_refined;
@@ -664,7 +720,15 @@ struct ApAnalyzer {
 // is an internal, eval-chosen constant; it is not part of the public API.
 const LOWBAND_REJECT_RATIO: f64 = 0.4;
 
-fn low_band_dominated(input: &[f64], re: &mut [f64], im: &mut [f64], fftsize: usize, fo: f64, fs: f64, fft: &Fft) -> bool {
+fn low_band_dominated(
+    input: &[f64],
+    re: &mut [f64],
+    im: &mut [f64],
+    fftsize: usize,
+    fo: f64,
+    fs: f64,
+    fft: &Fft,
+) -> bool {
     for i in 0..fftsize {
         re[i] = input[i] * hanning_window(i as f64, fftsize as f64, fftsize as f64);
         im[i] = 0.0;
@@ -683,7 +747,15 @@ fn low_band_dominated(input: &[f64], re: &mut [f64], im: &mut [f64], fftsize: us
 const VOICED_BAND_RATIO: f64 = 0.7;
 
 /// D4C "LoveTrain"-style voiced/unvoiced decision based on low/high band energy.
-fn estimate_is_voiced(input: &[f64], re: &mut [f64], im: &mut [f64], fftsize: usize, fo: f64, fs: f64, fft: &Fft) -> bool {
+fn estimate_is_voiced(
+    input: &[f64],
+    re: &mut [f64],
+    im: &mut [f64],
+    fftsize: usize,
+    fo: f64,
+    fs: f64,
+    fft: &Fft,
+) -> bool {
     if fs < 16000.0 {
         return true;
     }
@@ -746,7 +818,11 @@ fn interp1q(origin: f64, shift: f64, y: &[f64], xi: &[f64], yi: &mut [f64]) {
         let pos = (q - origin) / shift;
         let base = pos as usize; // truncation toward zero; pos >= 0 in all D4C uses
         let frac = pos - base as f64;
-        let delta = if base >= last { 0.0 } else { y[base + 1] - y[base] };
+        let delta = if base >= last {
+            0.0
+        } else {
+            y[base + 1] - y[base]
+        };
         yi[i] = y[base] + delta * frac;
     }
 }
@@ -802,7 +878,16 @@ fn interp1(x: &[f64], y: &[f64], xi: &[f64], k: &mut [usize], yi: &mut [f64]) {
 /// Blackman) at `center`, weight-correct, into `waveform[0..fft_size]`
 /// (zero-padded past the window). The matching window samples are written to
 /// `window`. SKIPS the +randn*1e-6 dither (negligible; the #1 bit-match risk).
-fn get_windowed_waveform(x: &[f64], fs: f64, current_f0: f64, center: usize, blackman: bool, window_length_ratio: f64, waveform: &mut [f64], window: &mut [f64]) {
+fn get_windowed_waveform(
+    x: &[f64],
+    fs: f64,
+    current_f0: f64,
+    center: usize,
+    blackman: bool,
+    window_length_ratio: f64,
+    waveform: &mut [f64],
+    window: &mut [f64],
+) {
     let half_window_length = matlab_round(window_length_ratio * fs / current_f0 / 2.0);
     let span = (half_window_length * 2 + 1) as usize;
     let x_last = x.len() as i64 - 1;
@@ -835,7 +920,14 @@ fn get_windowed_waveform(x: &[f64], fs: f64, current_f0: f64, center: usize, bla
 
 /// DCCorrection (common.cpp): add a low-frequency replica of `buf` to itself,
 /// in place over the first `upper_limit-1` bins. `axis`/`replica` are scratch.
-fn dc_correction(buf: &mut [f64], f0: f64, fs: f64, fft_size: usize, axis: &mut [f64], replica: &mut [f64]) {
+fn dc_correction(
+    buf: &mut [f64],
+    f0: f64,
+    fs: f64,
+    fft_size: usize,
+    axis: &mut [f64],
+    replica: &mut [f64],
+) {
     let upper_limit = 2 + (f0 * fft_size as f64 / fs) as usize;
     let axis = &mut axis[..upper_limit];
     for (i, a) in axis.iter_mut().enumerate() {
@@ -843,7 +935,13 @@ fn dc_correction(buf: &mut [f64], f0: f64, fs: f64, fft_size: usize, axis: &mut 
     }
     let replica = &mut replica[..upper_limit - 1];
     // WORLD queries only the first upper_limit-1 axis points (the array is one longer).
-    interp1q(f0 - axis[0], -fs / fft_size as f64, &buf[..upper_limit + 1], &axis[..upper_limit - 1], replica);
+    interp1q(
+        f0 - axis[0],
+        -fs / fft_size as f64,
+        &buf[..upper_limit + 1],
+        &axis[..upper_limit - 1],
+        replica,
+    );
     for i in 0..upper_limit - 1 {
         buf[i] += replica[i];
     }
@@ -860,7 +958,14 @@ struct SmoothScratch {
 
 /// LinearSmoothing (common.cpp): moving average of `input` over `width` Hz,
 /// written to `output`; both are half-spectra (len fft_size/2 + 1).
-fn linear_smoothing(input: &[f64], output: &mut [f64], width: f64, fs: f64, fft_size: usize, s: &mut SmoothScratch) {
+fn linear_smoothing(
+    input: &[f64],
+    output: &mut [f64],
+    width: f64,
+    fs: f64,
+    fft_size: usize,
+    s: &mut SmoothScratch,
+) {
     let half = fft_size / 2;
     let boundary = (width * fft_size as f64 / fs) as usize + 1;
     let mirror_len = half + boundary * 2 + 1;
@@ -897,7 +1002,21 @@ fn linear_smoothing(input: &[f64], output: &mut [f64], width: f64, fs: f64, fft_
 /// `re`/`im` are FFT scratch (len fft_size); `window`/`waveform` window scratch;
 /// `spec_re`/`spec_im` hold the first FFT's half-spectrum (len fft_size/2 + 1).
 #[allow(clippy::too_many_arguments)]
-fn get_centroid(x: &[f64], fs: f64, current_f0: f64, center: usize, fft: &Fft, fft_size: usize, out: &mut [f64], re: &mut [f64], im: &mut [f64], window: &mut [f64], waveform: &mut [f64], spec_re: &mut [f64], spec_im: &mut [f64]) {
+fn get_centroid(
+    x: &[f64],
+    fs: f64,
+    current_f0: f64,
+    center: usize,
+    fft: &Fft,
+    fft_size: usize,
+    out: &mut [f64],
+    re: &mut [f64],
+    im: &mut [f64],
+    window: &mut [f64],
+    waveform: &mut [f64],
+    spec_re: &mut [f64],
+    spec_im: &mut [f64],
+) {
     get_windowed_waveform(x, fs, current_f0, center, true, 4.0, waveform, window);
     let normalize_to = matlab_round(2.0 * fs / current_f0) as usize * 2;
     let mut power = 0.0;
@@ -938,10 +1057,10 @@ struct D4c {
     coarse_aperiodicity: Vec<f64>, // number_of_aperiodicities + 2
     frequency_axis: Vec<f64>, // output query axis (cfg.numbins)
     interp_index: Vec<usize>, // histc scratch for interp1, length numbins
-    re: Vec<f64>, // FFT real buffer, length fft_size
-    im: Vec<f64>, // FFT imag buffer, length fft_size
-    window: Vec<f64>, // F0-adaptive window samples, length fft_size
-    waveform: Vec<f64>, // windowed waveform, length fft_size
+    re: Vec<f64>,             // FFT real buffer, length fft_size
+    im: Vec<f64>,             // FFT imag buffer, length fft_size
+    window: Vec<f64>,         // F0-adaptive window samples, length fft_size
+    waveform: Vec<f64>,       // windowed waveform, length fft_size
     // half-spectrum buffers (length fft_size/2 + 1)
     spec_re: Vec<f64>,
     spec_im: Vec<f64>,
@@ -960,9 +1079,11 @@ struct D4c {
 impl D4c {
     fn new(cfg: &Config) -> Self {
         let fs = cfg.fs;
-        let fft_size = 2f64.powi(1 + ((4.0 * fs / D4C_FLOOR_F0 + 1.0).ln() / std::f64::consts::LN_2) as i32) as usize;
-        let number_of_aperiodicities =
-            ((D4C_UPPER_LIMIT.min(fs / 2.0 - D4C_FREQUENCY_INTERVAL)) / D4C_FREQUENCY_INTERVAL) as usize;
+        let fft_size = 2f64
+            .powi(1 + ((4.0 * fs / D4C_FLOOR_F0 + 1.0).ln() / std::f64::consts::LN_2) as i32)
+            as usize;
+        let number_of_aperiodicities = ((D4C_UPPER_LIMIT.min(fs / 2.0 - D4C_FREQUENCY_INTERVAL))
+            / D4C_FREQUENCY_INTERVAL) as usize;
         let window_length = (D4C_FREQUENCY_INTERVAL * fft_size as f64 / fs) as usize * 2 + 1;
         let mut nuttall_window = vec![0.0; window_length];
         nuttall_window_into(&mut nuttall_window);
@@ -1032,17 +1153,61 @@ impl D4c {
         let c1 = (center as i64 - off).clamp(0, x_last) as usize;
         let c2 = (center as i64 + off).clamp(0, x_last) as usize;
         let half = self.fft_size / 2;
-        get_centroid(x, self.fs, current_f0, c1, &self.fft, self.fft_size, &mut self.centroid1, &mut self.re, &mut self.im, &mut self.window, &mut self.waveform, &mut self.spec_re, &mut self.spec_im);
-        get_centroid(x, self.fs, current_f0, c2, &self.fft, self.fft_size, &mut self.centroid2, &mut self.re, &mut self.im, &mut self.window, &mut self.waveform, &mut self.spec_re, &mut self.spec_im);
+        get_centroid(
+            x,
+            self.fs,
+            current_f0,
+            c1,
+            &self.fft,
+            self.fft_size,
+            &mut self.centroid1,
+            &mut self.re,
+            &mut self.im,
+            &mut self.window,
+            &mut self.waveform,
+            &mut self.spec_re,
+            &mut self.spec_im,
+        );
+        get_centroid(
+            x,
+            self.fs,
+            current_f0,
+            c2,
+            &self.fft,
+            self.fft_size,
+            &mut self.centroid2,
+            &mut self.re,
+            &mut self.im,
+            &mut self.window,
+            &mut self.waveform,
+            &mut self.spec_re,
+            &mut self.spec_im,
+        );
         for i in 0..=half {
             self.static_centroid[i] = self.centroid1[i] + self.centroid2[i];
         }
-        dc_correction(&mut self.static_centroid, current_f0, self.fs, self.fft_size, &mut self.dc_axis, &mut self.dc_replica);
+        dc_correction(
+            &mut self.static_centroid,
+            current_f0,
+            self.fs,
+            self.fft_size,
+            &mut self.dc_axis,
+            &mut self.dc_replica,
+        );
     }
 
     /// GetSmoothedPowerSpectrum (d4c.cpp): into self.smoothed_power_spectrum.
     fn get_smoothed_power_spectrum(&mut self, x: &[f64], current_f0: f64, center: usize) {
-        get_windowed_waveform(x, self.fs, current_f0, center, false, 4.0, &mut self.waveform, &mut self.window);
+        get_windowed_waveform(
+            x,
+            self.fs,
+            current_f0,
+            center,
+            false,
+            4.0,
+            &mut self.waveform,
+            &mut self.window,
+        );
         self.re.copy_from_slice(&self.waveform);
         self.im.iter_mut().for_each(|v| *v = 0.0);
         self.fft.forward(&mut self.re, &mut self.im);
@@ -1051,8 +1216,22 @@ impl D4c {
         for i in 0..=half {
             self.power_spectrum[i] = complex_abs2(self.re[i], self.im[i]);
         }
-        dc_correction(&mut self.power_spectrum, current_f0, self.fs, self.fft_size, &mut self.dc_axis, &mut self.dc_replica);
-        linear_smoothing(&self.power_spectrum, &mut self.smoothed_power_spectrum, current_f0, self.fs, self.fft_size, &mut self.smooth);
+        dc_correction(
+            &mut self.power_spectrum,
+            current_f0,
+            self.fs,
+            self.fft_size,
+            &mut self.dc_axis,
+            &mut self.dc_replica,
+        );
+        linear_smoothing(
+            &self.power_spectrum,
+            &mut self.smoothed_power_spectrum,
+            current_f0,
+            self.fs,
+            self.fft_size,
+            &mut self.smooth,
+        );
     }
 
     /// GetStaticGroupDelay (d4c.cpp): into self.static_group_delay.
@@ -1063,9 +1242,23 @@ impl D4c {
             self.static_group_delay[i] = self.static_centroid[i] / self.smoothed_power_spectrum[i];
         }
         // Smooth at f0/2 in place (via spec_re as a temp), then subtract the f0 smooth.
-        linear_smoothing(&self.static_group_delay, &mut self.spec_re, current_f0 / 2.0, self.fs, self.fft_size, &mut self.smooth);
+        linear_smoothing(
+            &self.static_group_delay,
+            &mut self.spec_re,
+            current_f0 / 2.0,
+            self.fs,
+            self.fft_size,
+            &mut self.smooth,
+        );
         self.static_group_delay[..=half].copy_from_slice(&self.spec_re[..=half]);
-        linear_smoothing(&self.static_group_delay, &mut self.smoothed_group_delay, current_f0, self.fs, self.fft_size, &mut self.smooth);
+        linear_smoothing(
+            &self.static_group_delay,
+            &mut self.smoothed_group_delay,
+            current_f0,
+            self.fs,
+            self.fft_size,
+            &mut self.smooth,
+        );
         for i in 0..=half {
             self.static_group_delay[i] -= self.smoothed_group_delay[i];
         }
@@ -1080,9 +1273,11 @@ impl D4c {
         let half_window_length = window_length / 2;
         let boundary = matlab_round(fft_size as f64 * 8.0 / window_length as f64) as usize;
         for i in 0..self.number_of_aperiodicities {
-            let band_center = (D4C_FREQUENCY_INTERVAL * (i + 1) as f64 * fft_size as f64 / fs) as usize;
+            let band_center =
+                (D4C_FREQUENCY_INTERVAL * (i + 1) as f64 * fft_size as f64 / fs) as usize;
             for j in 0..=half_window_length * 2 {
-                self.re[j] = self.static_group_delay[band_center - half_window_length + j] * self.nuttall_window[j];
+                self.re[j] = self.static_group_delay[band_center - half_window_length + j]
+                    * self.nuttall_window[j];
             }
             for r in self.re[half_window_length * 2 + 1..].iter_mut() {
                 *r = 0.0;
@@ -1099,8 +1294,8 @@ impl D4c {
             for j in 1..=half {
                 self.power_spectrum[j] += self.power_spectrum[j - 1];
             }
-            self.coarse_aperiodicity[i + 1] =
-                10.0 * (self.power_spectrum[half - boundary - 1] / self.power_spectrum[half]).log10();
+            self.coarse_aperiodicity[i + 1] = 10.0
+                * (self.power_spectrum[half - boundary - 1] / self.power_spectrum[half]).log10();
         }
     }
 
@@ -1117,7 +1312,13 @@ impl D4c {
                 (self.coarse_aperiodicity[i + 1] + (current_f0 - 100.0) / 50.0).min(0.0);
         }
         // GetAperiodicity: interpolate coarse dB onto the output axis, then dB->linear.
-        interp1(&self.coarse_frequency_axis, &self.coarse_aperiodicity, &self.frequency_axis, &mut self.interp_index, ap);
+        interp1(
+            &self.coarse_frequency_axis,
+            &self.coarse_aperiodicity,
+            &self.frequency_axis,
+            &mut self.interp_index,
+            ap,
+        );
         for a in ap.iter_mut() {
             *a = 10f64.powf(*a / 20.0);
         }
@@ -1139,7 +1340,16 @@ impl ApAnalyzer {
     /// the Fo tracker's SRH harmonic score; the optional periodicity gate
     /// (`score >= score_min`, default 0.0 = off) rejects low-periodicity frames
     /// (see [`Reim::set_voicing_score_min`]). It is opt-in/experimental.
-    fn analyze(&mut self, cfg: &Config, fft: &Fft, input: &[f64], fo: f64, score: f64, issilence: bool, ap: &mut [f64]) -> bool {
+    fn analyze(
+        &mut self,
+        cfg: &Config,
+        fft: &Fft,
+        input: &[f64],
+        fo: f64,
+        score: f64,
+        issilence: bool,
+        ap: &mut [f64],
+    ) -> bool {
         let numbins = cfg.numbins;
         // Mirror the C guard exactly (analyze_ap.c:79): bail to unvoiced when silent
         // or fo is out of range. The negated range test (rather than `>=`/`<=`) makes
@@ -1148,10 +1358,27 @@ impl ApAnalyzer {
         let voiced = !issilence
             && !out_of_range
             && score >= self.score_min
-            && !low_band_dominated(input, &mut self.x_real, &mut self.x_imag, cfg.fftsize, fo, cfg.fs, fft)
-            && estimate_is_voiced(input, &mut self.x_real, &mut self.x_imag, cfg.fftsize, fo, cfg.fs, fft);
+            && !low_band_dominated(
+                input,
+                &mut self.x_real,
+                &mut self.x_imag,
+                cfg.fftsize,
+                fo,
+                cfg.fs,
+                fft,
+            )
+            && estimate_is_voiced(
+                input,
+                &mut self.x_real,
+                &mut self.x_imag,
+                cfg.fftsize,
+                fo,
+                cfg.fs,
+                fft,
+            );
         if voiced {
-            self.d4c.analyze(input, fo, cfg.fftsize / 2, &mut ap[..numbins]);
+            self.d4c
+                .analyze(input, fo, cfg.fftsize / 2, &mut ap[..numbins]);
         } else {
             ap[..numbins].fill(1.0);
         }
@@ -1195,7 +1422,13 @@ fn apply_replica(envelope: &mut [f64], numbins: usize, fo: f64, fs: f64) {
     mirror_upper(envelope, numbins);
 }
 
-fn smooth_spectrum(envelope: &mut [f64], spec_cumsum: &mut [f64], numbins: usize, freq_range: f64, fs: f64) {
+fn smooth_spectrum(
+    envelope: &mut [f64],
+    spec_cumsum: &mut [f64],
+    numbins: usize,
+    freq_range: f64,
+    fs: f64,
+) {
     let fftsize = 2 * (numbins - 1);
     let offset = numbins - 2;
     spec_cumsum[0] = envelope[numbins];
@@ -1212,14 +1445,23 @@ fn smooth_spectrum(envelope: &mut [f64], spec_cumsum: &mut [f64], numbins: usize
     for k in 0..numbins {
         let index_upper = offset + k + half_range_int;
         let index_lower = offset + k - half_range_int;
-        let upper = (1.0 - half_range_frac) * spec_cumsum[index_upper - 1] + half_range_frac * spec_cumsum[index_upper];
-        let lower = (1.0 - half_range_frac) * spec_cumsum[index_lower] + half_range_frac * spec_cumsum[index_lower - 1];
+        let upper = (1.0 - half_range_frac) * spec_cumsum[index_upper - 1]
+            + half_range_frac * spec_cumsum[index_upper];
+        let lower = (1.0 - half_range_frac) * spec_cumsum[index_lower]
+            + half_range_frac * spec_cumsum[index_lower - 1];
         envelope[k] = (upper - lower).max(1e-12) / (2.0 * half_range);
     }
     mirror_upper(envelope, numbins);
 }
 
-fn lifter_spectrum(envelope: &mut [f64], imag: &mut [f64], numbins: usize, fo: f64, fs: f64, fft: &Fft) {
+fn lifter_spectrum(
+    envelope: &mut [f64],
+    imag: &mut [f64],
+    numbins: usize,
+    fo: f64,
+    fs: f64,
+    fft: &Fft,
+) {
     let fftsize = 2 * (numbins - 1);
     for k in 0..fftsize {
         envelope[k] = (envelope[k] + 1e-12).ln();
@@ -1231,7 +1473,8 @@ fn lifter_spectrum(envelope: &mut [f64], imag: &mut [f64], numbins: usize, fo: f
     for k in 0..numbins {
         let t = k as f64 * fo / fs;
         let sinct = (REIM_PI * t + 1e-12).sin() / (REIM_PI * t + 1e-12);
-        envelope[k] *= sinct * ((1.0 - 2.0 * lifter_coeff) + 2.0 * lifter_coeff * (2.0 * REIM_PI * t).cos());
+        envelope[k] *=
+            sinct * ((1.0 - 2.0 * lifter_coeff) + 2.0 * lifter_coeff * (2.0 * REIM_PI * t).cos());
         imag[k] = 0.0;
     }
     for k in 0..numbins - 2 {
@@ -1257,7 +1500,16 @@ impl SpAnalyzer {
         }
     }
 
-    fn analyze(&mut self, cfg: &Config, fft: &Fft, input: &[f64], fo: f64, isvoiced: bool, issilence: bool, sp: &mut [f64]) {
+    fn analyze(
+        &mut self,
+        cfg: &Config,
+        fft: &Fft,
+        input: &[f64],
+        fo: f64,
+        isvoiced: bool,
+        issilence: bool,
+        sp: &mut [f64],
+    ) {
         let fs = cfg.fs;
         let fftsize = cfg.fftsize;
         let numbins = cfg.numbins;
@@ -1267,7 +1519,11 @@ impl SpAnalyzer {
             return;
         }
 
-        let window_fo = if isvoiced { fo } else { 1.0 / (cfg.period / 1000.0) };
+        let window_fo = if isvoiced {
+            fo
+        } else {
+            1.0 / (cfg.period / 1000.0)
+        };
         let smooth_fo = if isvoiced { fo } else { 300.0 };
 
         let analysis_interval = fs / window_fo;
@@ -1298,9 +1554,22 @@ impl SpAnalyzer {
         mirror_upper(&mut self.envelope, numbins);
 
         apply_replica(&mut self.envelope, numbins, window_fo, fs);
-        smooth_spectrum(&mut self.envelope, &mut self.spec_cumsum, numbins, smooth_fo / 2.0, fs);
+        smooth_spectrum(
+            &mut self.envelope,
+            &mut self.spec_cumsum,
+            numbins,
+            smooth_fo / 2.0,
+            fs,
+        );
         if isvoiced {
-            lifter_spectrum(&mut self.envelope, &mut self.x_imag, numbins, smooth_fo, fs, fft);
+            lifter_spectrum(
+                &mut self.envelope,
+                &mut self.x_imag,
+                numbins,
+                smooth_fo,
+                fs,
+                fft,
+            );
         }
 
         sp[..numbins].copy_from_slice(&self.envelope[..numbins]);
@@ -1336,7 +1605,13 @@ struct Synth {
 
 /// Build the minimum-phase complex spectrum from a power spectrum (in `spec_r`),
 /// scaled by `gain`. `spec_i` is used as scratch. Result occupies both arrays.
-fn generate_minimum_phase_spectrum(spec_r: &mut [f64], spec_i: &mut [f64], gain: f64, fftsize: usize, fft: &Fft) {
+fn generate_minimum_phase_spectrum(
+    spec_r: &mut [f64],
+    spec_i: &mut [f64],
+    gain: f64,
+    fftsize: usize,
+    fft: &Fft,
+) {
     let numbins = fftsize / 2 + 1;
     for k in 0..fftsize {
         spec_r[k] = (spec_r[k] + 1e-12).ln();
@@ -1364,7 +1639,17 @@ fn generate_minimum_phase_spectrum(spec_r: &mut [f64], spec_i: &mut [f64], gain:
 }
 
 /// Generate a (optionally fractionally shifted) impulse response from a spectrum.
-fn generate_impulse(impulse: &mut [f64], spec_r: &[f64], spec_i: &[f64], shift: f64, window: &[f64], temp_r: &mut [f64], temp_i: &mut [f64], fftsize: usize, fft: &Fft) {
+fn generate_impulse(
+    impulse: &mut [f64],
+    spec_r: &[f64],
+    spec_i: &[f64],
+    shift: f64,
+    window: &[f64],
+    temp_r: &mut [f64],
+    temp_i: &mut [f64],
+    fftsize: usize,
+    fft: &Fft,
+) {
     let numbins = fftsize / 2 + 1;
     if shift == 0.0 {
         temp_r[..fftsize].copy_from_slice(&spec_r[..fftsize]);
@@ -1441,7 +1726,16 @@ impl Synth {
         }
     }
 
-    fn new_frame(&mut self, cfg: &Config, fft: &Fft, fo: f64, isvoiced: bool, issilence: bool, ap: &[f64], sp: &[f64]) {
+    fn new_frame(
+        &mut self,
+        cfg: &Config,
+        fft: &Fft,
+        fo: f64,
+        isvoiced: bool,
+        issilence: bool,
+        ap: &[f64],
+        sp: &[f64],
+    ) {
         let fs = cfg.fs;
         let fftsize = cfg.fftsize;
         let numbins = cfg.numbins;
@@ -1459,13 +1753,35 @@ impl Synth {
         if self.has_pulse {
             self.interval = fs / fo;
             let gain_pulse = self.interval.sqrt();
-            generate_minimum_phase_spectrum(&mut self.spec_pulse_r, &mut self.spec_pulse_i, gain_pulse, fftsize, fft);
+            generate_minimum_phase_spectrum(
+                &mut self.spec_pulse_r,
+                &mut self.spec_pulse_i,
+                gain_pulse,
+                fftsize,
+                fft,
+            );
         }
 
         self.has_noise = !issilence;
         if self.has_noise {
-            generate_minimum_phase_spectrum(&mut self.spec_noise_r, &mut self.spec_noise_i, self.gain_noise, fftsize, fft);
-            generate_impulse(&mut self.impulse_noise, &self.spec_noise_r, &self.spec_noise_i, 0.0, &self.window, &mut self.temp_r, &mut self.temp_i, fftsize, fft);
+            generate_minimum_phase_spectrum(
+                &mut self.spec_noise_r,
+                &mut self.spec_noise_i,
+                self.gain_noise,
+                fftsize,
+                fft,
+            );
+            generate_impulse(
+                &mut self.impulse_noise,
+                &self.spec_noise_r,
+                &self.spec_noise_i,
+                0.0,
+                &self.window,
+                &mut self.temp_r,
+                &mut self.temp_i,
+                fftsize,
+                fft,
+            );
         }
     }
 
@@ -1474,7 +1790,17 @@ impl Synth {
 
         if self.has_pulse {
             if self.pulse_int == 0 {
-                generate_impulse(&mut self.impulse_pulse, &self.spec_pulse_r, &self.spec_pulse_i, self.pulse_frac, &self.window, &mut self.temp_r, &mut self.temp_i, fftsize, fft);
+                generate_impulse(
+                    &mut self.impulse_pulse,
+                    &self.spec_pulse_r,
+                    &self.spec_pulse_i,
+                    self.pulse_frac,
+                    &self.window,
+                    &mut self.temp_r,
+                    &mut self.temp_i,
+                    fftsize,
+                    fft,
+                );
                 self.buffer.push_additive(&self.impulse_pulse);
 
                 let interval_int = self.interval.floor();
@@ -1518,8 +1844,8 @@ pub struct Analyzer {
     ap: ApAnalyzer,
     sp: SpAnalyzer,
     frame_window: Vec<f64>, // fftsize+1 samples, oldest..newest
-    ap_buf: Vec<f64>, // numbins
-    sp_buf: Vec<f64>, // numbins
+    ap_buf: Vec<f64>,       // numbins
+    sp_buf: Vec<f64>,       // numbins
     last_fo: f64,
     last_voiced: bool,
     last_silence: bool,
@@ -1589,11 +1915,30 @@ impl Analyzer {
     fn analyze_current_frame(&mut self) {
         let fftsize = self.cfg.fftsize;
         // `wave` is the frame; `wave_d` is the same frame delayed by one sample.
-        let (wave_d, wave) = (&self.frame_window[..fftsize], &self.frame_window[1..fftsize + 1]);
+        let (wave_d, wave) = (
+            &self.frame_window[..fftsize],
+            &self.frame_window[1..fftsize + 1],
+        );
         let silence = analyze_silence(&self.cfg, wave, SILENCE_THRESHOLD);
         let fo = self.fo.analyze(&self.cfg, &self.fft, wave, wave_d);
-        let voiced = self.ap.analyze(&self.cfg, &self.fft, wave, fo, self.fo.last_score, silence, &mut self.ap_buf);
-        self.sp.analyze(&self.cfg, &self.fft, wave, fo, voiced, silence, &mut self.sp_buf);
+        let voiced = self.ap.analyze(
+            &self.cfg,
+            &self.fft,
+            wave,
+            fo,
+            self.fo.last_score,
+            silence,
+            &mut self.ap_buf,
+        );
+        self.sp.analyze(
+            &self.cfg,
+            &self.fft,
+            wave,
+            fo,
+            voiced,
+            silence,
+            &mut self.sp_buf,
+        );
         self.last_fo = fo;
         self.last_voiced = voiced;
         self.last_silence = silence;
@@ -1683,8 +2028,23 @@ impl Synthesizer {
     /// Supply the next frame's parameters (call once per frame boundary).
     /// `aperiodicity` and `spectral_envelope` must each be `numbins` long.
     /// Allocation-free.
-    pub fn push_frame(&mut self, fo: f64, voiced: bool, silence: bool, aperiodicity: &[f64], spectral_envelope: &[f64]) {
-        self.syn.new_frame(&self.cfg, &self.fft, fo, voiced, silence, aperiodicity, spectral_envelope);
+    pub fn push_frame(
+        &mut self,
+        fo: f64,
+        voiced: bool,
+        silence: bool,
+        aperiodicity: &[f64],
+        spectral_envelope: &[f64],
+    ) {
+        self.syn.new_frame(
+            &self.cfg,
+            &self.fft,
+            fo,
+            voiced,
+            silence,
+            aperiodicity,
+            spectral_envelope,
+        );
     }
 
     /// Produce one output sample (overlap-add). Call once per input sample.
@@ -1830,12 +2190,21 @@ pub fn read_wav(path: &str) -> Result<WavData, String> {
     }
     let body = &bytes[off..off + len];
     let samples = match (format, bits) {
-        (1, 16) => body.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]) as f64 / 32768.0).collect(),
+        (1, 16) => body
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f64 / 32768.0)
+            .collect(),
         (1, 8) => body.iter().map(|&b| (b as f64 - 128.0) / 128.0).collect(),
-        (3, 32) => body.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64).collect(),
+        (3, 32) => body
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64)
+            .collect(),
         _ => return Err(format!("unsupported format tag {format} / {bits} bits")),
     };
-    Ok(WavData { samples, sample_rate: rate })
+    Ok(WavData {
+        samples,
+        sample_rate: rate,
+    })
 }
 
 pub fn write_wav_f32(path: &str, samples: &[f64], sample_rate: u32) -> Result<(), String> {
@@ -1900,13 +2269,17 @@ impl Reim {
         let mut r = Reim::with_defaults(fs);
         let cfg = r.analyzer.cfg;
         let fftsize = cfg.fftsize;
-        let (mut t_sil, mut t_fo, mut t_ap, mut t_sp, mut t_nf, mut t_ns) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let (mut t_sil, mut t_fo, mut t_ap, mut t_sp, mut t_nf, mut t_ns) =
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         let mut frame_latencies = Vec::new();
         for &x in samples {
             let Reim { analyzer, synth } = &mut r;
             if analyzer.framer.next(x, &mut analyzer.frame_window) {
                 let frame_t0 = Instant::now();
-                let (wave_d, wave) = (&analyzer.frame_window[..fftsize], &analyzer.frame_window[1..fftsize + 1]);
+                let (wave_d, wave) = (
+                    &analyzer.frame_window[..fftsize],
+                    &analyzer.frame_window[1..fftsize + 1],
+                );
                 let t = Instant::now();
                 let silence = analyze_silence(&cfg, wave, SILENCE_THRESHOLD);
                 t_sil += t.elapsed().as_secs_f64();
@@ -1914,13 +2287,37 @@ impl Reim {
                 let fo = analyzer.fo.analyze(&cfg, &analyzer.fft, wave, wave_d);
                 t_fo += t.elapsed().as_secs_f64();
                 let t = Instant::now();
-                let voiced = analyzer.ap.analyze(&cfg, &analyzer.fft, wave, fo, analyzer.fo.last_score, silence, &mut analyzer.ap_buf);
+                let voiced = analyzer.ap.analyze(
+                    &cfg,
+                    &analyzer.fft,
+                    wave,
+                    fo,
+                    analyzer.fo.last_score,
+                    silence,
+                    &mut analyzer.ap_buf,
+                );
                 t_ap += t.elapsed().as_secs_f64();
                 let t = Instant::now();
-                analyzer.sp.analyze(&cfg, &analyzer.fft, wave, fo, voiced, silence, &mut analyzer.sp_buf);
+                analyzer.sp.analyze(
+                    &cfg,
+                    &analyzer.fft,
+                    wave,
+                    fo,
+                    voiced,
+                    silence,
+                    &mut analyzer.sp_buf,
+                );
                 t_sp += t.elapsed().as_secs_f64();
                 let t = Instant::now();
-                synth.syn.new_frame(&synth.cfg, &synth.fft, fo, voiced, silence, &analyzer.ap_buf, &analyzer.sp_buf);
+                synth.syn.new_frame(
+                    &synth.cfg,
+                    &synth.fft,
+                    fo,
+                    voiced,
+                    silence,
+                    &analyzer.ap_buf,
+                    &analyzer.sp_buf,
+                );
                 t_nf += t.elapsed().as_secs_f64();
                 frame_latencies.push(frame_t0.elapsed().as_secs_f64());
             }
@@ -2121,7 +2518,10 @@ mod tests {
         let input = vec![0.0; 6000];
         let mut out = vec![0.0; input.len()];
         r.process_block(&input, &mut out);
-        assert!(out.iter().all(|&x| x == 0.0), "silent input must yield silence");
+        assert!(
+            out.iter().all(|&x| x == 0.0),
+            "silent input must yield silence"
+        );
     }
 
     #[test]
@@ -2129,7 +2529,9 @@ mod tests {
         // 200 Hz tone should be detected as ~200 Hz on voiced frames.
         let fs = 24000.0;
         let n = (fs * 0.5) as usize;
-        let input: Vec<f64> = (0..n).map(|i| 0.5 * (2.0 * std::f64::consts::PI * 200.0 * i as f64 / fs).sin()).collect();
+        let input: Vec<f64> = (0..n)
+            .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 200.0 * i as f64 / fs).sin())
+            .collect();
         let mut r = Reim::with_defaults(fs);
         let mut last = 0u64;
         let mut fos = Vec::new();
@@ -2159,7 +2561,9 @@ mod tests {
         // not mean^2 -- a coefficient-of-variation gate would let the sweep through.
         let fs = 24000.0;
         let n = 2048;
-        let tone: Vec<f64> = (0..n).map(|i| (2.0 * std::f64::consts::PI * 200.0 * i as f64 / fs).sin()).collect();
+        let tone: Vec<f64> = (0..n)
+            .map(|i| (2.0 * std::f64::consts::PI * 200.0 * i as f64 / fs).sin())
+            .collect();
         let fo = analyze_fo_with_zerocross(&tone, fs).expect("steady tone passes the gate");
         assert!(approx(fo, 200.0, 5.0), "fo {fo} not near 200 Hz");
 
@@ -2173,7 +2577,10 @@ mod tests {
                 (2.0 * std::f64::consts::PI * f * i as f64 / fs).sin()
             })
             .collect();
-        assert!(analyze_fo_with_zerocross(&two_tone, fs).is_none(), "bimodal signal must fail the variance>mean gate");
+        assert!(
+            analyze_fo_with_zerocross(&two_tone, fs).is_none(),
+            "bimodal signal must fail the variance>mean gate"
+        );
     }
 
     #[test]
@@ -2192,8 +2599,19 @@ mod tests {
         // independent reference: the decision C reaches for a NaN fo
         let mut re = vec![0.0; cfg.fftsize];
         let mut im = vec![0.0; cfg.fftsize];
-        let expected = estimate_is_voiced(&input, &mut re, &mut im, cfg.fftsize, f64::NAN, cfg.fs, &fft);
-        assert_eq!(voiced, expected, "NaN fo must reach the V/UV decision, as in C");
+        let expected = estimate_is_voiced(
+            &input,
+            &mut re,
+            &mut im,
+            cfg.fftsize,
+            f64::NAN,
+            cfg.fs,
+            &fft,
+        );
+        assert_eq!(
+            voiced, expected,
+            "NaN fo must reach the V/UV decision, as in C"
+        );
     }
 
     #[test]
@@ -2212,7 +2630,9 @@ mod tests {
         // rejects every frame. Verifies the opt-in periodicity-gate plumbing.
         let fs = 24000.0;
         let n = (fs * 0.5) as usize;
-        let input: Vec<f64> = (0..n).map(|i| 0.5 * (2.0 * std::f64::consts::PI * 200.0 * i as f64 / fs).sin()).collect();
+        let input: Vec<f64> = (0..n)
+            .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 200.0 * i as f64 / fs).sin())
+            .collect();
         let count_voiced = |min: f64| {
             let mut r = Reim::with_defaults(fs);
             r.set_voicing_score_min(min);
@@ -2229,8 +2649,15 @@ mod tests {
             }
             voiced
         };
-        assert!(count_voiced(0.0) > 0, "gate off: a 200 Hz tone must have voiced frames");
-        assert_eq!(count_voiced(f64::INFINITY), 0, "infinite threshold must reject all frames");
+        assert!(
+            count_voiced(0.0) > 0,
+            "gate off: a 200 Hz tone must have voiced frames"
+        );
+        assert_eq!(
+            count_voiced(f64::INFINITY),
+            0,
+            "infinite threshold must reject all frames"
+        );
     }
 
     #[test]
@@ -2239,7 +2666,9 @@ mod tests {
         // only skipping synthesis (they share analyze_current_frame).
         let fs = 24000.0;
         let n = (fs * 0.4) as usize;
-        let input: Vec<f64> = (0..n).map(|i| 0.5 * (2.0 * std::f64::consts::PI * 180.0 * i as f64 / fs).sin()).collect();
+        let input: Vec<f64> = (0..n)
+            .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 180.0 * i as f64 / fs).sin())
+            .collect();
         let mut a = Reim::with_defaults(fs);
         let mut b = Reim::with_defaults(fs);
         for &x in &input {
@@ -2261,7 +2690,9 @@ mod tests {
         // sample -- the composition is the only behavior Reim adds.
         let fs = 24000.0;
         let n = (fs * 0.4) as usize;
-        let input: Vec<f64> = (0..n).map(|i| 0.5 * (2.0 * std::f64::consts::PI * 190.0 * i as f64 / fs).sin()).collect();
+        let input: Vec<f64> = (0..n)
+            .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 190.0 * i as f64 / fs).sin())
+            .collect();
 
         let mut reim = Reim::with_defaults(fs);
         let mut fused = vec![0.0; input.len()];
@@ -2272,10 +2703,19 @@ mod tests {
         let mut split = Vec::with_capacity(input.len());
         for &x in &input {
             if analyzer.push_sample(x) {
-                synth.push_frame(analyzer.fo(), analyzer.voiced(), analyzer.silence(), analyzer.aperiodicity(), analyzer.spectral_envelope());
+                synth.push_frame(
+                    analyzer.fo(),
+                    analyzer.voiced(),
+                    analyzer.silence(),
+                    analyzer.aperiodicity(),
+                    analyzer.spectral_envelope(),
+                );
             }
             split.push(synth.next_sample());
         }
-        assert_eq!(fused, split, "Analyzer+Synthesizer must match Reim sample-for-sample");
+        assert_eq!(
+            fused, split,
+            "Analyzer+Synthesizer must match Reim sample-for-sample"
+        );
     }
 }
