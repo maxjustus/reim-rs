@@ -789,16 +789,6 @@ const D4C_UPPER_LIMIT: f64 = 15000.0;
 const D4C_FLOOR_F0: f64 = 47.0;
 const D4C_SAFE_GUARD_MINIMUM: f64 = 1e-12;
 
-/// MATLAB-style round: truncate toward zero after a 0.5 nudge away from zero.
-/// Differs from Rust's `f64::round` on exact half-integers of negative numbers.
-fn matlab_round(x: f64) -> i64 {
-    if x > 0.0 {
-        (x + 0.5) as i64
-    } else {
-        (x - 0.5) as i64
-    }
-}
-
 /// Nuttall window into `y` (length `y.len()`), matching common.cpp NuttallWindow.
 fn nuttall_window_into(y: &mut [f64]) {
     let len = y.len();
@@ -816,7 +806,8 @@ fn interp1q(origin: f64, shift: f64, y: &[f64], xi: &[f64], yi: &mut [f64]) {
     let last = y.len() - 1;
     for (i, &q) in xi.iter().enumerate() {
         let pos = (q - origin) / shift;
-        let base = pos as usize; // truncation toward zero; pos >= 0 in all D4C uses
+        debug_assert!(pos >= 0.0, "interp1q: negative pos {pos} at query {q}");
+        let base = pos as usize;
         let frac = pos - base as f64;
         let delta = if base >= last {
             0.0
@@ -888,7 +879,7 @@ fn get_windowed_waveform(
     waveform: &mut [f64],
     window: &mut [f64],
 ) {
-    let half_window_length = matlab_round(window_length_ratio * fs / current_f0 / 2.0);
+    let half_window_length = (window_length_ratio * fs / current_f0 / 2.0).round() as i64;
     let span = (half_window_length * 2 + 1) as usize;
     let x_last = x.len() as i64 - 1;
     let origin = center as i64; // WORLD: round(current_position*fs + 0.001) == center
@@ -1018,7 +1009,7 @@ fn get_centroid(
     spec_im: &mut [f64],
 ) {
     get_windowed_waveform(x, fs, current_f0, center, true, 4.0, waveform, window);
-    let normalize_to = matlab_round(2.0 * fs / current_f0) as usize * 2;
+    let normalize_to = (2.0 * fs / current_f0).round() as usize * 2;
     let mut power = 0.0;
     for j in 0..=normalize_to {
         power += waveform[j] * waveform[j];
@@ -1148,7 +1139,7 @@ impl D4c {
     /// GetStaticCentroid (d4c.cpp): sum of centroids at +-0.25/f0, DC-corrected,
     /// into self.static_centroid.
     fn get_static_centroid(&mut self, x: &[f64], current_f0: f64, center: usize) {
-        let off = matlab_round(0.25 / current_f0 * self.fs);
+        let off = (0.25 / current_f0 * self.fs).round() as i64;
         let x_last = x.len() as i64 - 1;
         let c1 = (center as i64 - off).clamp(0, x_last) as usize;
         let c2 = (center as i64 + off).clamp(0, x_last) as usize;
@@ -1271,7 +1262,7 @@ impl D4c {
         let half = fft_size / 2;
         let window_length = self.nuttall_window.len();
         let half_window_length = window_length / 2;
-        let boundary = matlab_round(fft_size as f64 * 8.0 / window_length as f64) as usize;
+        let boundary = (fft_size as f64 * 8.0 / window_length as f64).round() as usize;
         for i in 0..self.number_of_aperiodicities {
             let band_center =
                 (D4C_FREQUENCY_INTERVAL * (i + 1) as f64 * fft_size as f64 / fs) as usize;
@@ -1294,8 +1285,12 @@ impl D4c {
             for j in 1..=half {
                 self.power_spectrum[j] += self.power_spectrum[j - 1];
             }
-            self.coarse_aperiodicity[i + 1] = 10.0
-                * (self.power_spectrum[half - boundary - 1] / self.power_spectrum[half]).log10();
+            let total = self.power_spectrum[half];
+            self.coarse_aperiodicity[i + 1] = if total > D4C_SAFE_GUARD_MINIMUM {
+                10.0 * (self.power_spectrum[half - boundary - 1] / total).log10()
+            } else {
+                -D4C_SAFE_GUARD_MINIMUM
+            };
         }
     }
 
