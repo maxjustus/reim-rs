@@ -43,6 +43,10 @@
 const REIM_PI: f64 = 3.14159265358979;
 const U32_MAX_F: f64 = u32::MAX as f64;
 
+use realfft::RealFftPlanner;
+use rustfft::num_complex::Complex;
+use rustfft::FftPlanner;
+
 // ============================================================================
 // Math helpers
 // ============================================================================
@@ -141,16 +145,21 @@ impl Xorshift {
 }
 
 // ============================================================================
-// FFT — iterative radix-2 Cooley-Tukey (decimation-in-time), planar in-place.
-// Forward uses the exp(-i) kernel; inverse uses exp(+i) and scales by 1/N,
-// matching the reference's `execute_fft` / `execute_ifft` conventions.
+// FFT — wraps rustfft (SIMD-optimized split-radix) behind the same planar API
+// the rest of the codebase expects. Forward uses the exp(-i) kernel; inverse
+// uses exp(+i) and scales by 1/N, matching the reference conventions.
 // ============================================================================
 
 struct Fft {
     n: usize,
-    rev: Vec<usize>, // bit-reversal permutation
-    cos: Vec<f64>,   // cos(2*pi*t/n), t in 0..n/2
-    sin: Vec<f64>,   // sin(2*pi*t/n), t in 0..n/2
+    fwd: std::sync::Arc<dyn rustfft::Fft<f64>>,
+    inv: std::sync::Arc<dyn rustfft::Fft<f64>>,
+    buf: Vec<Complex<f64>>,
+    scratch: Vec<Complex<f64>>,
+    r2c: std::sync::Arc<dyn realfft::RealToComplex<f64>>,
+    c2r: std::sync::Arc<dyn realfft::ComplexToReal<f64>>,
+    half_buf: Vec<Complex<f64>>,
+    real_scratch: Vec<Complex<f64>>,
 }
 
 impl Fft {
@@ -159,77 +168,98 @@ impl Fft {
             n.is_power_of_two() && n >= 2,
             "fft size must be a power of two"
         );
-        let bits = n.trailing_zeros();
-        let rev = (0..n)
-            .map(|i| ((i as u32).reverse_bits() >> (32 - bits)) as usize)
-            .collect();
-        let half = n / 2;
-        let mut cos = vec![0.0; half];
-        let mut sin = vec![0.0; half];
-        for t in 0..half {
-            let ang = 2.0 * std::f64::consts::PI * t as f64 / n as f64;
-            cos[t] = ang.cos();
-            sin[t] = ang.sin();
-        }
-        Fft { n, rev, cos, sin }
-    }
-
-    #[inline]
-    fn transform(&self, re: &mut [f64], im: &mut [f64], inverse: bool) {
-        let n = self.n;
-        debug_assert_eq!(re.len(), n);
-        debug_assert_eq!(im.len(), n);
-        // bit-reversal reordering
-        for i in 0..n {
-            let j = self.rev[i];
-            if j > i {
-                re.swap(i, j);
-                im.swap(i, j);
-            }
-        }
-        // butterflies
-        let mut len = 2;
-        while len <= n {
-            let half = len / 2;
-            let step = n / len;
-            let mut start = 0;
-            while start < n {
-                let mut tdx = 0;
-                for k in 0..half {
-                    let wr = self.cos[tdx];
-                    let wi = if inverse {
-                        self.sin[tdx]
-                    } else {
-                        -self.sin[tdx]
-                    };
-                    let a = start + k;
-                    let b = a + half;
-                    let xr = re[b] * wr - im[b] * wi;
-                    let xi = re[b] * wi + im[b] * wr;
-                    re[b] = re[a] - xr;
-                    im[b] = im[a] - xi;
-                    re[a] += xr;
-                    im[a] += xi;
-                    tdx += step;
-                }
-                start += len;
-            }
-            len <<= 1;
+        let mut planner = FftPlanner::new();
+        let fwd = planner.plan_fft_forward(n);
+        let inv = planner.plan_fft_inverse(n);
+        let scratch_len = fwd
+            .get_inplace_scratch_len()
+            .max(inv.get_inplace_scratch_len());
+        let mut real_planner = RealFftPlanner::<f64>::new();
+        let r2c = real_planner.plan_fft_forward(n);
+        let c2r = real_planner.plan_fft_inverse(n);
+        let real_scratch_len = r2c.get_scratch_len().max(c2r.get_scratch_len());
+        Fft {
+            n,
+            fwd,
+            inv,
+            buf: vec![Complex::default(); n],
+            scratch: vec![Complex::default(); scratch_len],
+            r2c,
+            c2r,
+            half_buf: vec![Complex::default(); n / 2 + 1],
+            real_scratch: vec![Complex::default(); real_scratch_len],
         }
     }
 
     #[inline]
-    fn forward(&self, re: &mut [f64], im: &mut [f64]) {
-        self.transform(re, im, false);
+    fn planar_to_interleaved(&mut self, re: &[f64], im: &[f64]) {
+        for i in 0..self.n {
+            self.buf[i] = Complex::new(re[i], im[i]);
+        }
     }
 
     #[inline]
-    fn inverse(&self, re: &mut [f64], im: &mut [f64]) {
-        self.transform(re, im, true);
+    fn interleaved_to_planar(&self, re: &mut [f64], im: &mut [f64]) {
+        for i in 0..self.n {
+            re[i] = self.buf[i].re;
+            im[i] = self.buf[i].im;
+        }
+    }
+
+    #[inline]
+    fn forward(&mut self, re: &mut [f64], im: &mut [f64]) {
+        self.planar_to_interleaved(re, im);
+        self.fwd
+            .process_with_scratch(&mut self.buf, &mut self.scratch);
+        self.interleaved_to_planar(re, im);
+    }
+
+    #[inline]
+    fn inverse(&mut self, re: &mut [f64], im: &mut [f64]) {
+        self.planar_to_interleaved(re, im);
+        self.inv
+            .process_with_scratch(&mut self.buf, &mut self.scratch);
         let scale = 1.0 / self.n as f64;
-        for k in 0..self.n {
-            re[k] *= scale;
-            im[k] *= scale;
+        for c in &mut self.buf {
+            c.re *= scale;
+            c.im *= scale;
+        }
+        self.interleaved_to_planar(re, im);
+    }
+
+    /// r2c FFT in-place: reads N real values from `data[0..N]`, writes the
+    /// real part of the half-spectrum back to `data[0..N/2+1]` and the
+    /// imaginary part to `im_out[0..N/2+1]`. `data[N/2+1..N]` is clobbered.
+    #[inline]
+    fn forward_real(&mut self, data: &mut [f64], im_out: &mut [f64]) {
+        self.r2c
+            .process_with_scratch(data, &mut self.half_buf, &mut self.real_scratch)
+            .unwrap();
+        let numbins = self.n / 2 + 1;
+        for k in 0..numbins {
+            data[k] = self.half_buf[k].re;
+            im_out[k] = self.half_buf[k].im;
+        }
+    }
+
+    /// c2r IFFT in-place: reads the half-spectrum real part from `data[0..N/2+1]`
+    /// and imaginary part from `im[0..N/2+1]`, then writes N real values to
+    /// `data[0..N]`. Applies 1/N scaling.
+    #[inline]
+    fn inverse_real(&mut self, data: &mut [f64], im: &[f64]) {
+        let numbins = self.n / 2 + 1;
+        for k in 0..numbins {
+            self.half_buf[k] = Complex::new(data[k], im[k]);
+        }
+        // c2r requires DC and Nyquist bins to be purely real
+        self.half_buf[0].im = 0.0;
+        self.half_buf[numbins - 1].im = 0.0;
+        self.c2r
+            .process_with_scratch(&mut self.half_buf, data, &mut self.real_scratch)
+            .unwrap();
+        let scale = 1.0 / self.n as f64;
+        for x in data[..self.n].iter_mut() {
+            *x *= scale;
         }
     }
 }
@@ -551,7 +581,7 @@ fn analyze_fo_with_zerocross(x: &[f64], fs: f64) -> Option<f64> {
 }
 
 impl FoAnalyzer {
-    fn new(cfg: &Config, fft: &Fft) -> Self {
+    fn new(cfg: &Config, fft: &mut Fft) -> Self {
         let fs = cfg.fs;
         let fftsize = cfg.fftsize;
         let numbins = cfg.numbins;
@@ -603,7 +633,13 @@ impl FoAnalyzer {
         }
     }
 
-    fn analyze(&mut self, cfg: &Config, fft: &Fft, input: &[f64], input_delayed: &[f64]) -> f64 {
+    fn analyze(
+        &mut self,
+        cfg: &Config,
+        fft: &mut Fft,
+        input: &[f64],
+        input_delayed: &[f64],
+    ) -> f64 {
         let fs = cfg.fs;
         let fo_floor = cfg.fo_floor;
         let fo_ceil = cfg.fo_ceil;
@@ -727,7 +763,7 @@ fn low_band_dominated(
     fftsize: usize,
     fo: f64,
     fs: f64,
-    fft: &Fft,
+    fft: &mut Fft,
 ) -> bool {
     for i in 0..fftsize {
         re[i] = input[i] * hanning_window(i as f64, fftsize as f64, fftsize as f64);
@@ -754,7 +790,7 @@ fn estimate_is_voiced(
     fftsize: usize,
     fo: f64,
     fs: f64,
-    fft: &Fft,
+    fft: &mut Fft,
 ) -> bool {
     if fs < 16000.0 {
         return true;
@@ -998,7 +1034,7 @@ fn get_centroid(
     fs: f64,
     current_f0: f64,
     center: usize,
-    fft: &Fft,
+    fft: &mut Fft,
     fft_size: usize,
     out: &mut [f64],
     re: &mut [f64],
@@ -1149,7 +1185,7 @@ impl D4c {
             self.fs,
             current_f0,
             c1,
-            &self.fft,
+            &mut self.fft,
             self.fft_size,
             &mut self.centroid1,
             &mut self.re,
@@ -1164,7 +1200,7 @@ impl D4c {
             self.fs,
             current_f0,
             c2,
-            &self.fft,
+            &mut self.fft,
             self.fft_size,
             &mut self.centroid2,
             &mut self.re,
@@ -1338,7 +1374,7 @@ impl ApAnalyzer {
     fn analyze(
         &mut self,
         cfg: &Config,
-        fft: &Fft,
+        fft: &mut Fft,
         input: &[f64],
         fo: f64,
         score: f64,
@@ -1400,14 +1436,6 @@ fn mirror_upper(arr: &mut [f64], numbins: usize) {
     }
 }
 
-/// Conjugate-Hermitian mirror of a complex spectrum: real part symmetric, imag negated.
-fn mirror_upper_conjugate(real: &mut [f64], imag: &mut [f64], numbins: usize) {
-    for k in 0..numbins - 2 {
-        real[numbins + k] = real[numbins - 2 - k];
-        imag[numbins + k] = -imag[numbins - 2 - k];
-    }
-}
-
 fn apply_replica(envelope: &mut [f64], numbins: usize, fo: f64, fs: f64) {
     let fftsize = 2 * (numbins - 1);
     let fobin = 1 + (fo / (fs / 2.0) * (numbins - 1) as f64).round() as usize;
@@ -1455,7 +1483,7 @@ fn lifter_spectrum(
     numbins: usize,
     fo: f64,
     fs: f64,
-    fft: &Fft,
+    fft: &mut Fft,
 ) {
     let fftsize = 2 * (numbins - 1);
     for k in 0..fftsize {
@@ -1498,7 +1526,7 @@ impl SpAnalyzer {
     fn analyze(
         &mut self,
         cfg: &Config,
-        fft: &Fft,
+        fft: &mut Fft,
         input: &[f64],
         fo: f64,
         isvoiced: bool,
@@ -1598,42 +1626,45 @@ struct Synth {
     buffer: CircularQueue,
 }
 
-/// Build the minimum-phase complex spectrum from a power spectrum (in `spec_r`),
-/// scaled by `gain`. `spec_i` is used as scratch. Result occupies both arrays.
+/// Build the minimum-phase complex half-spectrum from a power spectrum.
+/// Input: `spec_r[0..numbins]` = power spectrum (first half only, no mirror).
+/// Output: `spec_r[0..numbins]`, `spec_i[0..numbins]` = minimum-phase complex
+/// half-spectrum, scaled by `gain`. Uses real FFTs throughout.
 fn generate_minimum_phase_spectrum(
     spec_r: &mut [f64],
     spec_i: &mut [f64],
     gain: f64,
     fftsize: usize,
-    fft: &Fft,
+    fft: &mut Fft,
 ) {
     let numbins = fftsize / 2 + 1;
-    for k in 0..fftsize {
+    for k in 0..numbins {
         spec_r[k] = (spec_r[k] + 1e-12).ln();
-        spec_i[k] = 0.0;
     }
-    fft.inverse(spec_r, spec_i);
+    // c2r IFFT: log-power half-spectrum (im=0) → real cepstrum in spec_r[0..fftsize]
+    spec_i[..numbins].fill(0.0);
+    fft.inverse_real(spec_r, &spec_i[..numbins]);
 
+    // Keep the causal half of the cepstrum
     spec_r[0] *= 0.5;
-    spec_i[0] *= 0.5;
     spec_r[numbins - 1] *= 0.5;
-    spec_i[numbins - 1] *= 0.5;
     for k in numbins..fftsize {
         spec_r[k] = 0.0;
-        spec_i[k] = 0.0;
     }
 
-    fft.forward(spec_r, spec_i);
+    // r2c FFT: real causal cepstrum → complex log min-phase half-spectrum
+    fft.forward_real(spec_r, spec_i);
     for k in 0..numbins {
         let a = gain * spec_r[k].exp();
         let b = spec_i[k];
         spec_r[k] = a * b.cos();
         spec_i[k] = a * b.sin();
     }
-    mirror_upper_conjugate(spec_r, spec_i, numbins);
 }
 
-/// Generate a (optionally fractionally shifted) impulse response from a spectrum.
+/// Generate a (optionally fractionally shifted) impulse response from a
+/// half-spectrum. `spec_r[0..numbins]`, `spec_i[0..numbins]` hold the
+/// Hermitian half-spectrum; uses c2r IFFT.
 fn generate_impulse(
     impulse: &mut [f64],
     spec_r: &[f64],
@@ -1643,30 +1674,24 @@ fn generate_impulse(
     temp_r: &mut [f64],
     temp_i: &mut [f64],
     fftsize: usize,
-    fft: &Fft,
+    fft: &mut Fft,
 ) {
     let numbins = fftsize / 2 + 1;
     if shift == 0.0 {
-        temp_r[..fftsize].copy_from_slice(&spec_r[..fftsize]);
-        temp_i[..fftsize].copy_from_slice(&spec_i[..fftsize]);
+        temp_r[..numbins].copy_from_slice(&spec_r[..numbins]);
+        temp_i[..numbins].copy_from_slice(&spec_i[..numbins]);
     } else {
         for k in 0..numbins {
             let omega = -REIM_PI * shift * k as f64 / (numbins - 1) as f64;
-            temp_r[k] = omega.cos();
-            temp_i[k] = omega.sin();
-        }
-        mirror_upper_conjugate(temp_r, temp_i, numbins);
-        for k in 0..fftsize {
-            let xr1 = temp_r[k];
-            let xi1 = temp_i[k];
-            let xr2 = spec_r[k];
-            let xi2 = spec_i[k];
-            temp_r[k] = xr1 * xr2 - xi1 * xi2;
-            temp_i[k] = xr1 * xi2 + xi1 * xr2;
+            let cr = omega.cos();
+            let ci = omega.sin();
+            temp_r[k] = cr * spec_r[k] - ci * spec_i[k];
+            temp_i[k] = cr * spec_i[k] + ci * spec_r[k];
         }
     }
 
-    fft.inverse(temp_r, temp_i);
+    // c2r IFFT: half-spectrum → real time-domain in temp_r[0..fftsize]
+    fft.inverse_real(temp_r, &temp_i[..numbins]);
     ifftshift(temp_r, impulse, numbins);
 
     let mut gain = 0.0;
@@ -1724,7 +1749,7 @@ impl Synth {
     fn new_frame(
         &mut self,
         cfg: &Config,
-        fft: &Fft,
+        fft: &mut Fft,
         fo: f64,
         isvoiced: bool,
         issilence: bool,
@@ -1741,8 +1766,6 @@ impl Synth {
             self.spec_pulse_r[k] = spec * (1.0 - aper);
             self.spec_noise_r[k] = spec * aper;
         }
-        mirror_upper(&mut self.spec_pulse_r, numbins);
-        mirror_upper(&mut self.spec_noise_r, numbins);
 
         self.has_pulse = isvoiced && !issilence;
         if self.has_pulse {
@@ -1780,7 +1803,7 @@ impl Synth {
         }
     }
 
-    fn next_sample(&mut self, cfg: &Config, fft: &Fft) -> f64 {
+    fn next_sample(&mut self, cfg: &Config, fft: &mut Fft) -> f64 {
         let fftsize = cfg.fftsize;
 
         if self.has_pulse {
@@ -1877,8 +1900,8 @@ pub fn default_fftsize(fs: f64, fo_floor: f64) -> usize {
 impl Analyzer {
     pub fn new(fs: f64, period: f64, fftsize: usize, fo_floor: f64, fo_ceil: f64) -> Self {
         let cfg = Config::new(period, fftsize, fo_floor, fo_ceil, fs);
-        let fft = Fft::new(fftsize);
-        let fo = FoAnalyzer::new(&cfg, &fft);
+        let mut fft = Fft::new(fftsize);
+        let fo = FoAnalyzer::new(&cfg, &mut fft);
         let ap = ApAnalyzer::new(&cfg);
         let sp = SpAnalyzer::new(&cfg);
         Analyzer {
@@ -1915,10 +1938,10 @@ impl Analyzer {
             &self.frame_window[1..fftsize + 1],
         );
         let silence = analyze_silence(&self.cfg, wave, SILENCE_THRESHOLD);
-        let fo = self.fo.analyze(&self.cfg, &self.fft, wave, wave_d);
+        let fo = self.fo.analyze(&self.cfg, &mut self.fft, wave, wave_d);
         let voiced = self.ap.analyze(
             &self.cfg,
-            &self.fft,
+            &mut self.fft,
             wave,
             fo,
             self.fo.last_score,
@@ -1927,7 +1950,7 @@ impl Analyzer {
         );
         self.sp.analyze(
             &self.cfg,
-            &self.fft,
+            &mut self.fft,
             wave,
             fo,
             voiced,
@@ -2033,7 +2056,7 @@ impl Synthesizer {
     ) {
         self.syn.new_frame(
             &self.cfg,
-            &self.fft,
+            &mut self.fft,
             fo,
             voiced,
             silence,
@@ -2045,7 +2068,7 @@ impl Synthesizer {
     /// Produce one output sample (overlap-add). Call once per input sample.
     /// Allocation-free.
     pub fn next_sample(&mut self) -> f64 {
-        self.syn.next_sample(&self.cfg, &self.fft)
+        self.syn.next_sample(&self.cfg, &mut self.fft)
     }
 }
 
@@ -2242,6 +2265,12 @@ pub struct Profile {
     pub stage_new_frame: f64,
     pub stage_next_sample: f64,
     pub frame_latencies: Vec<f64>, // per-frame analysis latency
+    // synthesis sub-stages
+    pub synth_minphase_pulse: f64,
+    pub synth_minphase_noise: f64,
+    pub synth_impulse_noise: f64,
+    pub synth_pulse_gen: f64,
+    pub synth_pulse_gen_count: usize,
 }
 
 impl Reim {
@@ -2264,8 +2293,11 @@ impl Reim {
         let mut r = Reim::with_defaults(fs);
         let cfg = r.analyzer.cfg;
         let fftsize = cfg.fftsize;
+        let numbins = cfg.numbins;
         let (mut t_sil, mut t_fo, mut t_ap, mut t_sp, mut t_nf, mut t_ns) =
             (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let (mut t_mp_pulse, mut t_mp_noise, mut t_imp_noise) = (0.0, 0.0, 0.0);
+        let (mut t_pulse_gen, mut pulse_gen_count) = (0.0, 0usize);
         let mut frame_latencies = Vec::new();
         for &x in samples {
             let Reim { analyzer, synth } = &mut r;
@@ -2279,12 +2311,12 @@ impl Reim {
                 let silence = analyze_silence(&cfg, wave, SILENCE_THRESHOLD);
                 t_sil += t.elapsed().as_secs_f64();
                 let t = Instant::now();
-                let fo = analyzer.fo.analyze(&cfg, &analyzer.fft, wave, wave_d);
+                let fo = analyzer.fo.analyze(&cfg, &mut analyzer.fft, wave, wave_d);
                 t_fo += t.elapsed().as_secs_f64();
                 let t = Instant::now();
                 let voiced = analyzer.ap.analyze(
                     &cfg,
-                    &analyzer.fft,
+                    &mut analyzer.fft,
                     wave,
                     fo,
                     analyzer.fo.last_score,
@@ -2295,7 +2327,7 @@ impl Reim {
                 let t = Instant::now();
                 analyzer.sp.analyze(
                     &cfg,
-                    &analyzer.fft,
+                    &mut analyzer.fft,
                     wave,
                     fo,
                     voiced,
@@ -2303,22 +2335,101 @@ impl Reim {
                     &mut analyzer.sp_buf,
                 );
                 t_sp += t.elapsed().as_secs_f64();
-                let t = Instant::now();
-                synth.syn.new_frame(
-                    &synth.cfg,
-                    &synth.fft,
-                    fo,
-                    voiced,
-                    silence,
-                    &analyzer.ap_buf,
-                    &analyzer.sp_buf,
-                );
-                t_nf += t.elapsed().as_secs_f64();
+
+                // --- synthesis new_frame, sub-staged ---
+                let t_nf0 = Instant::now();
+                let syn = &mut synth.syn;
+                for k in 0..numbins {
+                    let spec = analyzer.sp_buf[k];
+                    let aper = analyzer.ap_buf[k] * analyzer.ap_buf[k];
+                    syn.spec_pulse_r[k] = spec * (1.0 - aper);
+                    syn.spec_noise_r[k] = spec * aper;
+                }
+                syn.has_pulse = voiced && !silence;
+                if syn.has_pulse {
+                    syn.interval = synth.cfg.fs / fo;
+                    let gain_pulse = syn.interval.sqrt();
+                    let t = Instant::now();
+                    generate_minimum_phase_spectrum(
+                        &mut syn.spec_pulse_r,
+                        &mut syn.spec_pulse_i,
+                        gain_pulse,
+                        fftsize,
+                        &mut synth.fft,
+                    );
+                    t_mp_pulse += t.elapsed().as_secs_f64();
+                }
+                syn.has_noise = !silence;
+                if syn.has_noise {
+                    let t = Instant::now();
+                    generate_minimum_phase_spectrum(
+                        &mut syn.spec_noise_r,
+                        &mut syn.spec_noise_i,
+                        syn.gain_noise,
+                        fftsize,
+                        &mut synth.fft,
+                    );
+                    t_mp_noise += t.elapsed().as_secs_f64();
+                    let t = Instant::now();
+                    generate_impulse(
+                        &mut syn.impulse_noise,
+                        &syn.spec_noise_r,
+                        &syn.spec_noise_i,
+                        0.0,
+                        &syn.window,
+                        &mut syn.temp_r,
+                        &mut syn.temp_i,
+                        fftsize,
+                        &mut synth.fft,
+                    );
+                    t_imp_noise += t.elapsed().as_secs_f64();
+                }
+                t_nf += t_nf0.elapsed().as_secs_f64();
                 frame_latencies.push(frame_t0.elapsed().as_secs_f64());
             }
-            let t = Instant::now();
-            let _ = synth.syn.next_sample(&synth.cfg, &synth.fft);
-            t_ns += t.elapsed().as_secs_f64();
+
+            // --- synthesis next_sample, sub-staged ---
+            let t_ns0 = Instant::now();
+            let syn = &mut synth.syn;
+            if syn.has_pulse {
+                if syn.pulse_int == 0 {
+                    let t = Instant::now();
+                    generate_impulse(
+                        &mut syn.impulse_pulse,
+                        &syn.spec_pulse_r,
+                        &syn.spec_pulse_i,
+                        syn.pulse_frac,
+                        &syn.window,
+                        &mut syn.temp_r,
+                        &mut syn.temp_i,
+                        fftsize,
+                        &mut synth.fft,
+                    );
+                    t_pulse_gen += t.elapsed().as_secs_f64();
+                    pulse_gen_count += 1;
+                    syn.buffer.push_additive(&syn.impulse_pulse);
+                    let interval_int = syn.interval.floor();
+                    let interval_frac = syn.interval - interval_int;
+                    let next = syn.pulse_frac + interval_frac;
+                    let carry = next.floor();
+                    syn.pulse_int += (interval_int + carry) as i32;
+                    syn.pulse_frac = next - carry;
+                }
+                syn.pulse_int -= 1;
+            }
+            if syn.has_noise {
+                if syn.noise_int == syn.interval_random {
+                    syn.buffer.push_additive(&syn.impulse_noise);
+                }
+                if syn.noise_int == syn.interval_velvet - 1 {
+                    let r = syn.random.uniform();
+                    syn.interval_random = (r * (syn.interval_velvet - 1) as f64).floor() as usize;
+                    syn.noise_int = 0;
+                }
+                syn.noise_int += 1;
+            }
+            let _ = syn.buffer.pop();
+            t_ns += t_ns0.elapsed().as_secs_f64();
         }
 
         Profile {
@@ -2333,6 +2444,11 @@ impl Reim {
             stage_new_frame: t_nf,
             stage_next_sample: t_ns,
             frame_latencies,
+            synth_minphase_pulse: t_mp_pulse,
+            synth_minphase_noise: t_mp_noise,
+            synth_impulse_noise: t_imp_noise,
+            synth_pulse_gen: t_pulse_gen,
+            synth_pulse_gen_count: pulse_gen_count,
         }
     }
 }
@@ -2351,7 +2467,7 @@ mod tests {
 
     #[test]
     fn fft_complex_exp() {
-        let fft = Fft::new(8);
+        let mut fft = Fft::new(8);
         // x[n] = exp(+i 2pi 2n/8): forward DFT spikes at bin 2 with magnitude 8.
         let mut xr = vec![1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0, 0.0];
         let mut xi = vec![0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, -1.0];
@@ -2365,7 +2481,7 @@ mod tests {
 
     #[test]
     fn fft_roundtrip() {
-        let fft = Fft::new(64);
+        let mut fft = Fft::new(64);
         let mut rng = Xorshift::new();
         let orig_r: Vec<f64> = (0..64).map(|_| rng.uniform() - 0.5).collect();
         let orig_i: Vec<f64> = (0..64).map(|_| rng.uniform() - 0.5).collect();
@@ -2584,13 +2700,21 @@ mod tests {
         // false, so it PROCEEDS to the V/UV decision. The Rust guard must do the
         // same rather than short-circuiting NaN straight to unvoiced.
         let cfg = Config::new(5.0, 2048, 71.0, 800.0, 24000.0);
-        let fft = Fft::new(cfg.fftsize);
+        let mut fft = Fft::new(cfg.fftsize);
         let mut ap = ApAnalyzer::new(&cfg);
         let input: Vec<f64> = (0..cfg.fftsize)
             .map(|i| (2.0 * std::f64::consts::PI * 200.0 * i as f64 / cfg.fs).sin())
             .collect();
         let mut buf = vec![0.0; cfg.numbins];
-        let voiced = ap.analyze(&cfg, &fft, &input, f64::NAN, f64::INFINITY, false, &mut buf);
+        let voiced = ap.analyze(
+            &cfg,
+            &mut fft,
+            &input,
+            f64::NAN,
+            f64::INFINITY,
+            false,
+            &mut buf,
+        );
         // independent reference: the decision C reaches for a NaN fo
         let mut re = vec![0.0; cfg.fftsize];
         let mut im = vec![0.0; cfg.fftsize];
@@ -2601,7 +2725,7 @@ mod tests {
             cfg.fftsize,
             f64::NAN,
             cfg.fs,
-            &fft,
+            &mut fft,
         );
         assert_eq!(
             voiced, expected,

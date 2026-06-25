@@ -12,6 +12,10 @@ path = "src/lib.rs"
 name = "reim"
 path = "src/main.rs"
 
+[dependencies]
+rustfft = "6"
+realfft = "3"
+
 [profile.release]
 opt-level = 3
 lto = true

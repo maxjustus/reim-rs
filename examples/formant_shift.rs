@@ -44,12 +44,22 @@ fn main() -> Result<(), String> {
     for &x in &wav.samples {
         if analyzer.push_sample(x) {
             warp_formants(analyzer.spectral_envelope(), ratio, &mut warped);
-            synth.push_frame(analyzer.fo(), analyzer.voiced(), analyzer.silence(), analyzer.aperiodicity(), &warped);
+            synth.push_frame(
+                analyzer.fo(),
+                analyzer.voiced(),
+                analyzer.silence(),
+                analyzer.aperiodicity(),
+                &warped,
+            );
         }
         out.push(synth.next_sample());
     }
 
     write_wav_f32(&args[2], &out, wav.sample_rate)?;
-    eprintln!("wrote {} ({} samples, formant ratio {ratio})", args[2], out.len());
+    eprintln!(
+        "wrote {} ({} samples, formant ratio {ratio})",
+        args[2],
+        out.len()
+    );
     Ok(())
 }

@@ -28,7 +28,9 @@ fn synthetic_input() -> Vec<f64> {
     let mut x = vec![0.0; N];
     let mut lcg: u64 = 0x2545_F491_4F6C_DD1D; // fixed seed -> deterministic "noise"
     let mut noise = || {
-        lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        lcg = lcg
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((lcg >> 33) as f64 / (1u64 << 31) as f64) - 1.0 // ~[-1, 1)
     };
     let pi = std::f64::consts::PI;
@@ -76,7 +78,10 @@ fn write_golden(path: &std::path::Path, out: &[f64]) {
 
 fn read_golden(path: &std::path::Path) -> Vec<f64> {
     let bytes = std::fs::read(path).unwrap();
-    bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64).collect()
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64)
+        .collect()
 }
 
 #[test]
@@ -85,17 +90,28 @@ fn roundtrip_matches_golden() {
     let mut reim = Reim::with_defaults(FS);
     let mut out = vec![0.0; input.len()];
     reim.process_block(&input, &mut out);
-    assert!(out.iter().all(|x| x.is_finite()), "round trip produced non-finite samples");
+    assert!(
+        out.iter().all(|x| x.is_finite()),
+        "round trip produced non-finite samples"
+    );
 
     let path = golden_path();
     if std::env::var("REGEN_SNAPSHOT").is_ok() || !path.exists() {
         write_golden(&path, &out);
-        eprintln!("snapshot: wrote golden {} ({} samples)", path.display(), out.len());
+        eprintln!(
+            "snapshot: wrote golden {} ({} samples)",
+            path.display(),
+            out.len()
+        );
         return;
     }
 
     let golden = read_golden(&path);
-    assert_eq!(golden.len(), out.len(), "golden length changed; regenerate if intended");
+    assert_eq!(
+        golden.len(),
+        out.len(),
+        "golden length changed; regenerate if intended"
+    );
     let snr = snr_db(&golden, &out);
     assert!(
         snr > MIN_SNR_DB,

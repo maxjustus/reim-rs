@@ -10,7 +10,10 @@ use reim::{default_fftsize, read_wav, write_wav_f32, Reim};
 // Optional, EXPERIMENTAL: enable the voicing periodicity gate from the CLI via the
 // REIM_VOICING_SCORE_MIN env var (e.g. =1000). Default off. See README "Voicing".
 fn apply_voicing_env(reim: &mut Reim) {
-    if let Some(x) = std::env::var("REIM_VOICING_SCORE_MIN").ok().and_then(|v| v.parse::<f64>().ok()) {
+    if let Some(x) = std::env::var("REIM_VOICING_SCORE_MIN")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+    {
         reim.set_voicing_score_min(x);
     }
 }
@@ -22,7 +25,12 @@ fn cmd_process(input: &str, output: &str) -> Result<(), String> {
     let mut out = vec![0.0; wav.samples.len()];
     reim.process_block(&wav.samples, &mut out);
     write_wav_f32(output, &out, wav.sample_rate)?;
-    println!("processed {} samples @ {} Hz -> {}", wav.samples.len(), wav.sample_rate, output);
+    println!(
+        "processed {} samples @ {} Hz -> {}",
+        wav.samples.len(),
+        wav.sample_rate,
+        output
+    );
     Ok(())
 }
 
@@ -93,7 +101,9 @@ fn cmd_eval(reference: &str, input: &str, feat: Option<&str>) -> Result<(), Stri
     }
 
     let n = refwav.samples.len().min(out.len());
-    let max_err = (0..n).map(|i| (refwav.samples[i] - out[i]).abs()).fold(0.0_f64, f64::max);
+    let max_err = (0..n)
+        .map(|i| (refwav.samples[i] - out[i]).abs())
+        .fold(0.0_f64, f64::max);
     let gsnr = global_snr(&refwav.samples, &out);
     let ssnr = segmental_snr(&refwav.samples, &out, 240);
 
@@ -105,7 +115,8 @@ fn cmd_eval(reference: &str, input: &str, feat: Option<&str>) -> Result<(), Stri
     println!("  segmental SNR   : {ssnr:.2} dB (240-sample frames)");
 
     if let Some(feat_path) = feat {
-        let text = std::fs::read_to_string(feat_path).map_err(|e| format!("read {feat_path}: {e}"))?;
+        let text =
+            std::fs::read_to_string(feat_path).map_err(|e| format!("read {feat_path}: {e}"))?;
         let mut sil_match = 0usize;
         let mut vu_match = 0usize;
         let mut fo_close = 0usize;
@@ -145,11 +156,23 @@ fn cmd_eval(reference: &str, input: &str, feat: Option<&str>) -> Result<(), Stri
         }
         println!("== per-frame features (vs {feat_path}) ==");
         println!("  frames compared : {total}");
-        println!("  silence match   : {sil_match}/{total} ({:.1}%)", pct(sil_match, total));
-        println!("  voiced match    : {vu_match}/{total} ({:.1}%)", pct(vu_match, total));
-        println!("  fo within 2%    : {fo_close}/{total} ({:.1}%)", pct(fo_close, total));
+        println!(
+            "  silence match   : {sil_match}/{total} ({:.1}%)",
+            pct(sil_match, total)
+        );
+        println!(
+            "  voiced match    : {vu_match}/{total} ({:.1}%)",
+            pct(vu_match, total)
+        );
+        println!(
+            "  fo within 2%    : {fo_close}/{total} ({:.1}%)",
+            pct(fo_close, total)
+        );
         if fo_err_cnt > 0 {
-            println!("  mean rel fo err : {:.4}% (over {fo_err_cnt} voiced-ish frames)", 100.0 * fo_err_sum / fo_err_cnt as f64);
+            println!(
+                "  mean rel fo err : {:.4}% (over {fo_err_cnt} voiced-ish frames)",
+                100.0 * fo_err_sum / fo_err_cnt as f64
+            );
         }
     }
     Ok(())
@@ -165,7 +188,9 @@ fn cmd_bench(input: Option<&str>) -> Result<(), String> {
         None => {
             let fs = 24000.0;
             let n = (fs * 2.0) as usize;
-            let s = (0..n).map(|i| 0.3 * (2.0 * std::f64::consts::PI * 220.0 * i as f64 / fs).sin()).collect();
+            let s = (0..n)
+                .map(|i| 0.3 * (2.0 * std::f64::consts::PI * 220.0 * i as f64 / fs).sin())
+                .collect();
             (s, fs)
         }
     };
@@ -175,19 +200,55 @@ fn cmd_bench(input: Option<&str>) -> Result<(), String> {
     let rtf = audio_secs / p.elapsed_total;
 
     println!("== throughput ==");
-    println!("  input           : {} samples, {:.2} s @ {} Hz", p.samples, audio_secs, p.fs as u32);
+    println!(
+        "  input           : {} samples, {:.2} s @ {} Hz",
+        p.samples, audio_secs, p.fs as u32
+    );
     println!("  process time    : {:.4} s", p.elapsed_total);
-    println!("  real-time factor: {:.1}x   (>1 = faster than real time)", rtf);
-    println!("  per sample      : {:.1} ns", p.elapsed_total * 1e9 / p.samples as f64);
+    println!(
+        "  real-time factor: {:.1}x   (>1 = faster than real time)",
+        rtf
+    );
+    println!(
+        "  per sample      : {:.1} ns",
+        p.elapsed_total * 1e9 / p.samples as f64
+    );
 
     let frame_work = p.stage_silence + p.stage_fo + p.stage_ap + p.stage_sp + p.stage_new_frame;
     println!("== per-stage (total over run) ==");
     println!("  silence         : {:8.2} ms", p.stage_silence * 1e3);
-    println!("  fo              : {:8.2} ms   ({:.0}% of frame work)", p.stage_fo * 1e3, 100.0 * p.stage_fo / frame_work);
+    println!(
+        "  fo              : {:8.2} ms   ({:.0}% of frame work)",
+        p.stage_fo * 1e3,
+        100.0 * p.stage_fo / frame_work
+    );
     println!("  ap              : {:8.2} ms", p.stage_ap * 1e3);
     println!("  sp              : {:8.2} ms", p.stage_sp * 1e3);
     println!("  synth new_frame : {:8.2} ms", p.stage_new_frame * 1e3);
-    println!("  synth next_samp : {:8.2} ms   (per-sample hot path)", p.stage_next_sample * 1e3);
+    println!(
+        "  synth next_samp : {:8.2} ms   (per-sample hot path)",
+        p.stage_next_sample * 1e3
+    );
+    println!("== synthesis sub-stages ==");
+    println!(
+        "  minphase pulse  : {:8.2} ms",
+        p.synth_minphase_pulse * 1e3
+    );
+    println!(
+        "  minphase noise  : {:8.2} ms",
+        p.synth_minphase_noise * 1e3
+    );
+    println!("  impulse noise   : {:8.2} ms", p.synth_impulse_noise * 1e3);
+    println!(
+        "  pulse gen (ifft): {:8.2} ms   ({} calls, {:.1} us/call)",
+        p.synth_pulse_gen * 1e3,
+        p.synth_pulse_gen_count,
+        if p.synth_pulse_gen_count > 0 {
+            p.synth_pulse_gen / p.synth_pulse_gen_count as f64 * 1e6
+        } else {
+            0.0
+        }
+    );
 
     let mut lat = p.frame_latencies;
     lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -200,9 +261,22 @@ fn cmd_bench(input: Option<&str>) -> Result<(), String> {
     let budget_us = p.period_ms * 1000.0;
     println!("== per-frame analysis latency ==");
     println!("  frames          : {}", lat.len());
-    println!("  mean            : {:.1} us", lat.iter().sum::<f64>() / lat.len().max(1) as f64 * 1e6);
-    println!("  p50 / p99 / max : {:.1} / {:.1} / {:.1} us", q(0.50), q(0.99), q(1.0));
-    println!("  frame budget    : {:.1} us ({} ms period)  -> headroom {:.0}x", budget_us, p.period_ms, budget_us / q(1.0).max(1e-9));
+    println!(
+        "  mean            : {:.1} us",
+        lat.iter().sum::<f64>() / lat.len().max(1) as f64 * 1e6
+    );
+    println!(
+        "  p50 / p99 / max : {:.1} / {:.1} / {:.1} us",
+        q(0.50),
+        q(0.99),
+        q(1.0)
+    );
+    println!(
+        "  frame budget    : {:.1} us ({} ms period)  -> headroom {:.0}x",
+        budget_us,
+        p.period_ms,
+        budget_us / q(1.0).max(1e-9)
+    );
     Ok(())
 }
 
@@ -210,7 +284,12 @@ fn cmd_bench(input: Option<&str>) -> Result<(), String> {
 // time is the analysis-window center, so the contour aligns with the audio it
 // describes. fftsize defaults to the sample-rate-aware default (1024 at 16 kHz,
 // 2048 at 24-48 kHz) and can be overridden as the 4th positional arg.
-fn cmd_f0(input: &str, fmin: Option<&str>, fmax: Option<&str>, fftarg: Option<&str>) -> Result<(), String> {
+fn cmd_f0(
+    input: &str,
+    fmin: Option<&str>,
+    fmax: Option<&str>,
+    fftarg: Option<&str>,
+) -> Result<(), String> {
     let fo_floor: f64 = fmin.unwrap_or("71").parse().map_err(|_| "bad fmin")?;
     let fo_ceil: f64 = fmax.unwrap_or("800").parse().map_err(|_| "bad fmax")?;
     let wav = read_wav(input)?;
@@ -231,7 +310,11 @@ fn cmd_f0(input: &str, fmin: Option<&str>, fmax: Option<&str>, fftarg: Option<&s
             let t = ((i as f64 - half) / fs).max(0.0);
             // emit pitch only on voiced frames so the contour reflects the full
             // voicing decision (incl. the sub-fundamental rumble guard), not just analyze_fo
-            let fo = if reim.last_voiced() { reim.last_fo() } else { 0.0 };
+            let fo = if reim.last_voiced() {
+                reim.last_fo()
+            } else {
+                0.0
+            };
             out.push_str(&format!("{t:.6},{fo:.4}\n"));
         }
     }
@@ -275,9 +358,16 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let result = match args.get(1).map(|s| s.as_str()) {
         Some("process") if args.len() == 4 => cmd_process(&args[2], &args[3]),
-        Some("eval") if args.len() >= 4 => cmd_eval(&args[2], &args[3], args.get(4).map(|s| s.as_str())),
+        Some("eval") if args.len() >= 4 => {
+            cmd_eval(&args[2], &args[3], args.get(4).map(|s| s.as_str()))
+        }
         Some("bench") => cmd_bench(args.get(2).map(|s| s.as_str())),
-        Some("f0") if args.len() >= 3 => cmd_f0(&args[2], args.get(3).map(|s| s.as_str()), args.get(4).map(|s| s.as_str()), args.get(5).map(|s| s.as_str())),
+        Some("f0") if args.len() >= 3 => cmd_f0(
+            &args[2],
+            args.get(3).map(|s| s.as_str()),
+            args.get(4).map(|s| s.as_str()),
+            args.get(5).map(|s| s.as_str()),
+        ),
         Some("ap") if args.len() == 4 => cmd_ap(&args[2], &args[3]),
         _ => usage(),
     };
