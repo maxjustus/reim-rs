@@ -156,10 +156,11 @@ struct Fft {
     inv: std::sync::Arc<dyn rustfft::Fft<f64>>,
     buf: Vec<Complex<f64>>,
     scratch: Vec<Complex<f64>>,
-    r2c: std::sync::Arc<dyn realfft::RealToComplex<f64>>,
-    c2r: std::sync::Arc<dyn realfft::ComplexToReal<f64>>,
-    half_buf: Vec<Complex<f64>>,
-    real_scratch: Vec<Complex<f64>>,
+    r2c: std::sync::Arc<dyn realfft::RealToComplex<f32>>,
+    c2r: std::sync::Arc<dyn realfft::ComplexToReal<f32>>,
+    half_buf: Vec<Complex<f32>>,
+    real_scratch: Vec<Complex<f32>>,
+    real_buf: Vec<f32>,
 }
 
 impl Fft {
@@ -174,10 +175,10 @@ impl Fft {
         let scratch_len = fwd
             .get_inplace_scratch_len()
             .max(inv.get_inplace_scratch_len());
-        let mut real_planner = RealFftPlanner::<f64>::new();
-        let r2c = real_planner.plan_fft_forward(n);
-        let c2r = real_planner.plan_fft_inverse(n);
-        let real_scratch_len = r2c.get_scratch_len().max(c2r.get_scratch_len());
+        let mut real_planner_f32 = RealFftPlanner::<f32>::new();
+        let r2c = real_planner_f32.plan_fft_forward(n);
+        let c2r = real_planner_f32.plan_fft_inverse(n);
+        let real_scratch_len_f32 = r2c.get_scratch_len().max(c2r.get_scratch_len());
         Fft {
             n,
             fwd,
@@ -187,7 +188,8 @@ impl Fft {
             r2c,
             c2r,
             half_buf: vec![Complex::default(); n / 2 + 1],
-            real_scratch: vec![Complex::default(); real_scratch_len],
+            real_scratch: vec![Complex::default(); real_scratch_len_f32],
+            real_buf: vec![0.0f32; n],
         }
     }
 
@@ -227,39 +229,48 @@ impl Fft {
         self.interleaved_to_planar(re, im);
     }
 
-    /// r2c FFT in-place: reads N real values from `data[0..N]`, writes the
-    /// real part of the half-spectrum back to `data[0..N/2+1]` and the
-    /// imaginary part to `im_out[0..N/2+1]`. `data[N/2+1..N]` is clobbered.
+    /// r2c FFT in f32. Accepts/returns f64;
+    /// conversion happens at the boundary.
     #[inline]
     fn forward_real(&mut self, data: &mut [f64], im_out: &mut [f64]) {
+        let n = self.n;
+        for i in 0..n {
+            self.real_buf[i] = data[i] as f32;
+        }
         self.r2c
-            .process_with_scratch(data, &mut self.half_buf, &mut self.real_scratch)
+            .process_with_scratch(
+                &mut self.real_buf,
+                &mut self.half_buf,
+                &mut self.real_scratch,
+            )
             .unwrap();
-        let numbins = self.n / 2 + 1;
+        let numbins = n / 2 + 1;
         for k in 0..numbins {
-            data[k] = self.half_buf[k].re;
-            im_out[k] = self.half_buf[k].im;
+            data[k] = self.half_buf[k].re as f64;
+            im_out[k] = self.half_buf[k].im as f64;
         }
     }
 
-    /// c2r IFFT in-place: reads the half-spectrum real part from `data[0..N/2+1]`
-    /// and imaginary part from `im[0..N/2+1]`, then writes N real values to
-    /// `data[0..N]`. Applies 1/N scaling.
+    /// Like `inverse_real` but runs the IFFT in f32. Accepts/returns f64;
+    /// conversion happens at the boundary.
     #[inline]
     fn inverse_real(&mut self, data: &mut [f64], im: &[f64]) {
         let numbins = self.n / 2 + 1;
         for k in 0..numbins {
-            self.half_buf[k] = Complex::new(data[k], im[k]);
+            self.half_buf[k] = Complex::new(data[k] as f32, im[k] as f32);
         }
-        // c2r requires DC and Nyquist bins to be purely real
         self.half_buf[0].im = 0.0;
         self.half_buf[numbins - 1].im = 0.0;
         self.c2r
-            .process_with_scratch(&mut self.half_buf, data, &mut self.real_scratch)
+            .process_with_scratch(
+                &mut self.half_buf,
+                &mut self.real_buf,
+                &mut self.real_scratch,
+            )
             .unwrap();
         let scale = 1.0 / self.n as f64;
-        for x in data[..self.n].iter_mut() {
-            *x *= scale;
+        for i in 0..self.n {
+            data[i] = self.real_buf[i] as f64 * scale;
         }
     }
 }
@@ -325,15 +336,35 @@ impl CircularQueue {
     fn push_additive(&mut self, samples: &[f64]) {
         let cap = self.buf.len();
         let size = samples.len();
-        let mut index = self.head;
-        for (i, &value) in samples.iter().enumerate() {
-            if i >= cap {
-                self.buf[index] = value; // overwrite on overflow
-                self.head = wrap_next(self.head, cap);
+        if size <= cap {
+            let first = cap - self.head;
+            if size <= first {
+                for (d, &s) in self.buf[self.head..self.head + size]
+                    .iter_mut()
+                    .zip(samples)
+                {
+                    *d += s;
+                }
             } else {
-                self.buf[index] += value;
+                let (s1, s2) = samples.split_at(first);
+                for (d, &s) in self.buf[self.head..].iter_mut().zip(s1) {
+                    *d += s;
+                }
+                for (d, &s) in self.buf[..s2.len()].iter_mut().zip(s2) {
+                    *d += s;
+                }
             }
-            index = wrap_next(index, cap);
+        } else {
+            let mut index = self.head;
+            for (i, &value) in samples.iter().enumerate() {
+                if i >= cap {
+                    self.buf[index] = value;
+                    self.head = wrap_next(self.head, cap);
+                } else {
+                    self.buf[index] += value;
+                }
+                index = wrap_next(index, cap);
+            }
         }
         self.remaining = size.max(self.remaining).min(cap);
     }
@@ -1641,7 +1672,7 @@ fn generate_minimum_phase_spectrum(
     for k in 0..numbins {
         spec_r[k] = (spec_r[k] + 1e-12).ln();
     }
-    // c2r IFFT: log-power half-spectrum (im=0) → real cepstrum in spec_r[0..fftsize]
+    // c2r IFFT (f32): log-power half-spectrum (im=0) → real cepstrum in spec_r
     spec_i[..numbins].fill(0.0);
     fft.inverse_real(spec_r, &spec_i[..numbins]);
 
@@ -1652,7 +1683,7 @@ fn generate_minimum_phase_spectrum(
         spec_r[k] = 0.0;
     }
 
-    // r2c FFT: real causal cepstrum → complex log min-phase half-spectrum
+    // r2c FFT (f32): real causal cepstrum → complex log min-phase half-spectrum
     fft.forward_real(spec_r, spec_i);
     for k in 0..numbins {
         let a = gain * spec_r[k].exp();
@@ -1690,7 +1721,7 @@ fn generate_impulse(
         }
     }
 
-    // c2r IFFT: half-spectrum → real time-domain in temp_r[0..fftsize]
+    // c2r IFFT (f32): half-spectrum → real time-domain in temp_r[0..fftsize]
     fft.inverse_real(temp_r, &temp_i[..numbins]);
     ifftshift(temp_r, impulse, numbins);
 
