@@ -1,14 +1,16 @@
 //! Round-trip snapshot regression.
 //!
-//! The C oracle (`reim eval`) validates the analysis side (silence/voiced/Fo) and,
-//! today, the synthesis waveform to the f32 noise floor. Once the aperiodicity
-//! stage stops being a binary placeholder, the synthesis waveform will diverge
-//! from the C by design and the oracle's waveform check no longer applies. This
-//! test is the replacement net for that waveform: it freezes reim's own output on
-//! a fixed synthetic signal and fails if the round trip changes unexpectedly.
+//! The C reference (`reim eval`) validates the analysis side (silence/voiced/Fo)
+//! and, today, the synthesis waveform to the f32 noise floor. Once the
+//! aperiodicity stage stops being a binary placeholder, the synthesis waveform
+//! will diverge from the C by design and the reference's waveform check no longer
+//! applies. This test is the replacement net for that waveform: it freezes reim's
+//! own output on a fixed synthetic signal and fails if the round trip changes
+//! unexpectedly.
 //!
 //! It compares against a committed golden via SNR (tolerant to floating-point
-//! noise, sensitive to real behavior changes), the same methodology as the oracle.
+//! noise, sensitive to real behavior changes), the same methodology as the C
+//! reference.
 //! Regenerate the golden deliberately after an intended synthesis change:
 //!
 //!     REGEN_SNAPSHOT=1 cargo test --release --test snapshot

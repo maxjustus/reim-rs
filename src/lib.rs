@@ -2581,7 +2581,7 @@ mod tests {
     #[test]
     fn rng_matches_reference_c() {
         // Reference values produced by the C xorshift with the same fixed seed.
-        // Full f64 digits are intentional: they mirror the exact C oracle output
+        // Full f64 digits are intentional: they mirror the exact C reference output
         // and are asserted to 1e-15, so excessive_precision is expected here.
         #[allow(clippy::excessive_precision)]
         let expected = [
@@ -2682,7 +2682,7 @@ mod tests {
     #[test]
     fn default_fftsize_adapts_to_sample_rate() {
         // 16 kHz drops to 1024 (the documented benchmark win); 24-48 kHz stay 2048
-        // so the bundled-file oracle and the latency story are unchanged.
+        // so the bundled-file reference and the latency story are unchanged.
         assert_eq!(default_fftsize(16000.0, 71.0), 1024);
         assert_eq!(default_fftsize(24000.0, 71.0), 2048);
         assert_eq!(default_fftsize(44100.0, 71.0), 2048);

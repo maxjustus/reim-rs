@@ -3,8 +3,8 @@
 A Rust port of [ReIm](https://github.com/nakakq/reim), a real-time
 [WORLD](https://github.com/mmorise/World)-like speech vocoder by
 [@nakakq](https://github.com/nakakq). The original C implementation is included
-as a git submodule under `reim/` and serves as the correctness oracle for the
-port.
+as a git submodule under `reference/reim/` and serves as the correctness
+reference for the port.
 
 ReIm analyzes a mono signal into three acoustic features compatible with
 WORLD -- fundamental frequency (Fo), spectral envelope (Sp), and aperiodicity
@@ -20,7 +20,7 @@ directly.
   all working buffers are owned by the analyzer/synthesizer state and reused.
 - Self-contained: hand-written radix-2 FFT, xorshift RNG, and WAV I/O.
 - Faithful to the C reference for Fo/Sp/synthesis, matched to the f32 noise floor
-  against a C oracle. Three small in-source deviations keep that output: the
+  against the C reference. Three small in-source deviations keep that output: the
   silence RMS skips a one-element out-of-bounds read present in the C; the Ap
   range guard mirrors the C's exact branch semantics (including NaN handling); and
   the Fo periodicity gate computes a real variance instead of the C's std-dev
@@ -128,7 +128,7 @@ cargo clippy --all-targets --release   # clean (lints tests too)
 ```
 
 `tests/snapshot.rs` freezes the analysis->synthesis waveform against a committed
-golden (compared by SNR). The C oracle stays the reference for the analysis
+golden (compared by SNR). The C reference stays the baseline for the analysis
 decisions; this guards the synthesized output, which will diverge from the C once
 aperiodicity becomes more than a placeholder. Regenerate after an intended change:
 `REGEN_SNAPSHOT=1 cargo test --release --test snapshot`.
@@ -161,19 +161,19 @@ Reads PCM8/PCM16/float32 mono WAV; writes float32 mono.
 
 ## Correctness
 
-The reference C implementation is the oracle. `oracle.c` builds against the C
-sources (it needs libsndfile) and emits a reference output WAV plus per-frame
-features; `reim eval` then compares the Rust output sample-for-sample and checks
-the silence/voiced/Fo decisions per frame.
+The reference C implementation is the correctness baseline. `reference/reim_reference.c`
+builds against the C sources (it needs libsndfile) and emits a reference output
+WAV plus per-frame features; `reim eval` then compares the Rust output
+sample-for-sample and checks the silence/voiced/Fo decisions per frame.
 
 ```
-cc -O2 -std=c99 -Ireim/include oracle.c reim/src/*.c \
-   $(pkg-config --cflags --libs sndfile) -lm -o /tmp/oracle
-/tmp/oracle in.wav /tmp/ref.wav /tmp/feat.csv /tmp/spap.csv
+cc -O2 -std=c99 -Ireference/reim/include reference/reim_reference.c reference/reim/src/*.c \
+   $(pkg-config --cflags --libs sndfile) -lm -o /tmp/reim_reference
+/tmp/reim_reference in.wav /tmp/ref.wav /tmp/feat.csv /tmp/spap.csv
 ./target/release/reim eval /tmp/ref.wav in.wav /tmp/feat.csv
 ```
 
-Measured against the C oracle, the Rust **analysis decisions** match it exactly:
+Measured against the C reference, the Rust **analysis decisions** match it exactly:
 100% per-frame agreement on silence, voiced/unvoiced, and Fo (0.0000% relative Fo
 error) across the bundled 24 kHz voice file and synthetic 8/16/44.1 kHz signals
 with vibrato, noise, and silence. The Fo and spectral-envelope paths reproduce the
@@ -183,7 +183,7 @@ The **synthesized waveform** no longer matches the C bit-for-bit: ReIm computes
 real D4C band-aperiodicity where the C reference leaves aperiodicity a binary
 placeholder, so the output diverges by design (the per-frame decisions above are
 unaffected — voicing is decided before aperiodicity). `tests/snapshot.rs` guards
-the synthesized output against a frozen reim golden instead of the C oracle.
+the synthesized output against a frozen reim golden instead of the C reference.
 
 ## Pitch (Fo) accuracy
 
@@ -253,7 +253,7 @@ solo singing ([Vocadito](https://zenodo.org/records/5578807), 40 clips) voicing
 F1 rises 83.5 -> 86.2 (precision up, recall flat) with RPA unchanged; on 16 kHz
 TTS speech it is roughly neutral (RPA -1.3). The guard surfaces only through
 `last_voiced()`; its threshold is an internal eval-chosen constant. It does not
-fire on clean speech, so it leaves the oracle agreement above unchanged.
+fire on clean speech, so it leaves the C reference agreement above unchanged.
 
 ReIm also ships an **optional, experimental periodicity gate, off by default**.
 The Fo tracker returns a best candidate even on breath or noise, so a fo-in-range

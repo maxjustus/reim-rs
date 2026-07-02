@@ -1,15 +1,12 @@
-// D4C aperiodicity ground-truth oracle (for validating reim's aperiodicity port).
+// WORLD D4C aperiodicity reference (for validating reim's aperiodicity port).
 // Runs WORLD's D4C on a waveform + an externally-supplied F0 contour, so the
 // comparison isolates the aperiodicity computation from F0-estimation differences.
 //
 // Build (needs a checkout of github.com/mmorise/World):
 //   git clone --depth 1 https://github.com/mmorise/World /tmp/World
 //   (cd /tmp/World && c++ -O2 -std=c++11 -Isrc -c src/*.cpp && ar rcs libworld.a *.o)
-//   c++ -O2 -std=c++11 -I/tmp/World/src eval/d4c_oracle.cpp /tmp/World/libworld.a -o /tmp/d4c_oracle
+//   c++ -O2 -std=c++11 -I/tmp/World/src reference/d4c_reference.cpp /tmp/World/libworld.a -o /tmp/d4c_reference
 // Feed it raw-f64 audio + reim's "time,f0" CSV (from `reim f0`); see eval/ notes.
-//
-// Dump WORLD D4C aperiodicity for a given waveform + externally-supplied F0
-// contour (so the comparison isolates D4C from F0 estimation differences).
 // args: x.f64  f0.csv("time,f0")  fs  fft_size  out.f64
 #include <cstdio>
 #include <cstdlib>

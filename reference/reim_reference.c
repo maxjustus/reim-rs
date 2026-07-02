@@ -1,5 +1,5 @@
-// Ground-truth oracle: runs the exact ReIm pipeline (example.c) on a WAV file
-// using libsndfile only, dumping the output waveform + per-frame features.
+// Runs the C ReIm pipeline on a WAV file via libsndfile, dumping the output
+// waveform and per-frame features for comparison against the Rust port.
 #include "reim/analyze_ap.h"
 #include "reim/analyze_fo.h"
 #include "reim/analyze_silence.h"
