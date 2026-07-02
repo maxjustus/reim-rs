@@ -153,14 +153,22 @@ impl Xorshift {
 struct Fft {
     n: usize,
     fwd: std::sync::Arc<dyn rustfft::Fft<f64>>,
+    #[cfg(test)]
     inv: std::sync::Arc<dyn rustfft::Fft<f64>>,
     buf: Vec<Complex<f64>>,
     scratch: Vec<Complex<f64>>,
+    // f32 real FFT (synthesis path)
     r2c: std::sync::Arc<dyn realfft::RealToComplex<f32>>,
     c2r: std::sync::Arc<dyn realfft::ComplexToReal<f32>>,
     half_buf: Vec<Complex<f32>>,
     real_scratch: Vec<Complex<f32>>,
     real_buf: Vec<f32>,
+    // f64 real FFT (analysis path)
+    r2c_f64: std::sync::Arc<dyn realfft::RealToComplex<f64>>,
+    c2r_f64: std::sync::Arc<dyn realfft::ComplexToReal<f64>>,
+    half_buf_f64: Vec<Complex<f64>>,
+    real_scratch_f64: Vec<Complex<f64>>,
+    real_buf_f64: Vec<f64>,
 }
 
 impl Fft {
@@ -179,9 +187,14 @@ impl Fft {
         let r2c = real_planner_f32.plan_fft_forward(n);
         let c2r = real_planner_f32.plan_fft_inverse(n);
         let real_scratch_len_f32 = r2c.get_scratch_len().max(c2r.get_scratch_len());
+        let mut real_planner_f64 = RealFftPlanner::<f64>::new();
+        let r2c_f64 = real_planner_f64.plan_fft_forward(n);
+        let c2r_f64 = real_planner_f64.plan_fft_inverse(n);
+        let real_scratch_len_f64 = r2c_f64.get_scratch_len().max(c2r_f64.get_scratch_len());
         Fft {
             n,
             fwd,
+            #[cfg(test)]
             inv,
             buf: vec![Complex::default(); n],
             scratch: vec![Complex::default(); scratch_len],
@@ -190,6 +203,11 @@ impl Fft {
             half_buf: vec![Complex::default(); n / 2 + 1],
             real_scratch: vec![Complex::default(); real_scratch_len_f32],
             real_buf: vec![0.0f32; n],
+            r2c_f64,
+            c2r_f64,
+            half_buf_f64: vec![Complex::default(); n / 2 + 1],
+            real_scratch_f64: vec![Complex::default(); real_scratch_len_f64],
+            real_buf_f64: vec![0.0; n],
         }
     }
 
@@ -216,6 +234,7 @@ impl Fft {
         self.interleaved_to_planar(re, im);
     }
 
+    #[cfg(test)]
     #[inline]
     fn inverse(&mut self, re: &mut [f64], im: &mut [f64]) {
         self.planar_to_interleaved(re, im);
@@ -271,6 +290,48 @@ impl Fft {
         let scale = 1.0 / self.n as f64;
         for i in 0..self.n {
             data[i] = self.real_buf[i] as f64 * scale;
+        }
+    }
+
+    /// r2c FFT in f64: `re[0..n]` → half-spectrum in `re[0..numbins]`, `im[0..numbins]`.
+    #[inline]
+    fn forward_real_f64(&mut self, re: &mut [f64], im: &mut [f64]) {
+        let n = self.n;
+        let numbins = n / 2 + 1;
+        self.real_buf_f64[..n].copy_from_slice(&re[..n]);
+        self.r2c_f64
+            .process_with_scratch(
+                &mut self.real_buf_f64,
+                &mut self.half_buf_f64,
+                &mut self.real_scratch_f64,
+            )
+            .unwrap();
+        for k in 0..numbins {
+            re[k] = self.half_buf_f64[k].re;
+            im[k] = self.half_buf_f64[k].im;
+        }
+    }
+
+    /// c2r IFFT in f64: half-spectrum `re[0..numbins]`, `im[0..numbins]` → `re[0..n]`.
+    #[inline]
+    fn inverse_real_f64(&mut self, re: &mut [f64], im: &[f64]) {
+        let n = self.n;
+        let numbins = n / 2 + 1;
+        for k in 0..numbins {
+            self.half_buf_f64[k] = Complex::new(re[k], im[k]);
+        }
+        self.half_buf_f64[0].im = 0.0;
+        self.half_buf_f64[numbins - 1].im = 0.0;
+        self.c2r_f64
+            .process_with_scratch(
+                &mut self.half_buf_f64,
+                &mut self.real_buf_f64,
+                &mut self.real_scratch_f64,
+            )
+            .unwrap();
+        let scale = 1.0 / n as f64;
+        for i in 0..n {
+            re[i] = self.real_buf_f64[i] * scale;
         }
     }
 }
@@ -677,15 +738,13 @@ impl FoAnalyzer {
         let fftsize = cfg.fftsize;
         let numbins = cfg.numbins;
 
-        // windowed spectra of the frame and its one-sample-delayed copy
+        // windowed spectra of the frame and its one-sample-delayed copy (real FFT)
         for k in 0..fftsize {
             self.spec_r[k] = input[k] * self.window[k];
-            self.spec_i[k] = 0.0;
             self.specd_r[k] = input_delayed[k] * self.window[k];
-            self.specd_i[k] = 0.0;
         }
-        fft.forward(&mut self.spec_r, &mut self.spec_i);
-        fft.forward(&mut self.specd_r, &mut self.specd_i);
+        fft.forward_real_f64(&mut self.spec_r, &mut self.spec_i);
+        fft.forward_real_f64(&mut self.specd_r, &mut self.specd_i);
 
         for k in 0..numbins {
             self.pspec[k] = complex_abs2(self.spec_r[k], self.spec_i[k]) + 1e-15;
@@ -698,7 +757,7 @@ impl FoAnalyzer {
             );
         }
 
-        // spectrum of the DC-removed frame (for band-pass filtering)
+        // spectrum of the DC-removed frame (for band-pass filtering, real FFT)
         let mut mean_input = 0.0;
         for k in 0..fftsize {
             mean_input += input[k];
@@ -706,9 +765,8 @@ impl FoAnalyzer {
         mean_input /= fftsize as f64;
         for k in 0..fftsize {
             self.spec_filt_r[k] = input[k] - mean_input;
-            self.spec_filt_i[k] = 0.0;
         }
-        fft.forward(&mut self.spec_filt_r, &mut self.spec_filt_i);
+        fft.forward_real_f64(&mut self.spec_filt_r, &mut self.spec_filt_i);
 
         // initial estimate: previous fo
         let mut best_fo = -1.0;
@@ -726,15 +784,15 @@ impl FoAnalyzer {
             best_score = get_harmonic_score(best_fo, fs, &self.pspec, numbins);
         }
 
-        // DIO over each channel filter
+        // DIO over each channel filter (half-spectrum multiply + real IFFT)
         for ch in 0..self.num_candidates {
             let base = ch * fftsize;
-            for k in 0..fftsize {
+            for k in 0..numbins {
                 let filter = self.channel_filters[base + k];
                 self.filtered_r[k] = self.spec_filt_r[k] * filter;
                 self.filtered_i[k] = self.spec_filt_i[k] * filter;
             }
-            fft.inverse(&mut self.filtered_r, &mut self.filtered_i);
+            fft.inverse_real_f64(&mut self.filtered_r, &self.filtered_i);
 
             let offset = self.channel_offsets[ch];
             let Some(fo) = analyze_fo_with_zerocross(&self.filtered_r[offset..], fs) else {
@@ -798,9 +856,8 @@ fn low_band_dominated(
 ) -> bool {
     for i in 0..fftsize {
         re[i] = input[i] * hanning_window(i as f64, fftsize as f64, fftsize as f64);
-        im[i] = 0.0;
     }
-    fft.forward(re, im);
+    fft.forward_real_f64(re, im);
     let bin = |hz: f64| ((hz / fs * fftsize as f64) as usize).min(fftsize / 2);
     let (lo, mid) = (bin(20.0), bin(0.8 * fo));
     let hi = bin((6.0 * fo).min(fs / 2.0 - 1.0));
@@ -829,10 +886,10 @@ fn estimate_is_voiced(
     let window_length = (1.5 * fs / fo).min(fftsize as f64);
     for i in 0..fftsize {
         re[i] = input[i] * blackman_window(i as f64, fftsize as f64, window_length);
-        im[i] = 0.0;
     }
-    fft.forward(re, im);
-    for k in 0..=fftsize / 2 {
+    fft.forward_real_f64(re, im);
+    let numbins = fftsize / 2 + 1;
+    for k in 0..numbins {
         re[k] = complex_abs2(re[k], im[k]);
     }
     let index_lower = (100.0 / fs * fftsize as f64).floor() as usize;
@@ -1086,18 +1143,16 @@ fn get_centroid(
         waveform[j] *= inv;
     }
     let half = fft_size / 2;
-    // First FFT: spectrum of the normalized waveform.
+    // First FFT: spectrum of the normalized waveform (real FFT).
     re.copy_from_slice(waveform);
-    im.iter_mut().for_each(|v| *v = 0.0);
-    fft.forward(re, im);
+    fft.forward_real_f64(re, im);
     spec_re[..=half].copy_from_slice(&re[..=half]);
     spec_im[..=half].copy_from_slice(&im[..=half]);
-    // Second FFT: of waveform * (i+1).
+    // Second FFT: of waveform * (i+1) (real FFT).
     for j in 0..fft_size {
         re[j] = waveform[j] * (j as f64 + 1.0);
-        im[j] = 0.0;
     }
-    fft.forward(re, im);
+    fft.forward_real_f64(re, im);
     for i in 0..=half {
         out[i] = re[i] * spec_re[i] + spec_im[i] * im[i];
     }
@@ -1267,10 +1322,8 @@ impl D4c {
             &mut self.window,
         );
         self.re.copy_from_slice(&self.waveform);
-        self.im.iter_mut().for_each(|v| *v = 0.0);
-        self.fft.forward(&mut self.re, &mut self.im);
+        self.fft.forward_real_f64(&mut self.re, &mut self.im);
         let half = self.fft_size / 2;
-        // Reuse power_spectrum as the raw |X|^2 buffer before smoothing.
         for i in 0..=half {
             self.power_spectrum[i] = complex_abs2(self.re[i], self.im[i]);
         }
@@ -1340,8 +1393,7 @@ impl D4c {
             for r in self.re[half_window_length * 2 + 1..].iter_mut() {
                 *r = 0.0;
             }
-            self.im.iter_mut().for_each(|v| *v = 0.0);
-            self.fft.forward(&mut self.re, &mut self.im);
+            self.fft.forward_real_f64(&mut self.re, &mut self.im);
             for j in 0..=half {
                 self.power_spectrum[j] = complex_abs2(self.re[j], self.im[j]);
             }
@@ -1519,9 +1571,11 @@ fn lifter_spectrum(
     let fftsize = 2 * (numbins - 1);
     for k in 0..fftsize {
         envelope[k] = (envelope[k] + 1e-12).ln();
-        imag[k] = 0.0;
     }
-    fft.inverse(envelope, imag);
+    // Log-envelope is symmetric (from mirror_upper); its half-spectrum is real.
+    // c2r IFFT: use envelope[0..numbins] as re, zeros as im → cepstrum.
+    imag[..numbins].fill(0.0);
+    fft.inverse_real_f64(envelope, &imag[..numbins]);
 
     let lifter_coeff = -0.15;
     for k in 0..numbins {
@@ -1529,14 +1583,13 @@ fn lifter_spectrum(
         let sinct = (REIM_PI * t + 1e-12).sin() / (REIM_PI * t + 1e-12);
         envelope[k] *=
             sinct * ((1.0 - 2.0 * lifter_coeff) + 2.0 * lifter_coeff * (2.0 * REIM_PI * t).cos());
-        imag[k] = 0.0;
     }
     for k in 0..numbins - 2 {
         envelope[numbins + k] = envelope[numbins - 2 - k];
-        imag[numbins + k] = 0.0;
     }
 
-    fft.forward(envelope, imag);
+    // Liftered cepstrum is symmetric; r2c FFT → half-spectrum (im ≈ 0).
+    fft.forward_real_f64(envelope, imag);
     for k in 0..numbins {
         envelope[k] = envelope[k].exp();
     }
@@ -1586,7 +1639,6 @@ impl SpAnalyzer {
         for i in 0..fftsize {
             self.window[i] = hanning_window(i as f64, fftsize as f64, window_length) * window_scale;
             self.x_real[i] = input[i] * self.window[i];
-            self.x_imag[i] = 0.0;
         }
 
         // remove DC component (weighted by window)
@@ -1601,7 +1653,7 @@ impl SpAnalyzer {
             self.x_real[i] -= gain_dc * self.window[i];
         }
 
-        fft.forward(&mut self.x_real, &mut self.x_imag);
+        fft.forward_real_f64(&mut self.x_real, &mut self.x_imag);
         for k in 0..numbins {
             self.envelope[k] = complex_abs2(self.x_real[k], self.x_imag[k]);
         }
