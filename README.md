@@ -1,13 +1,18 @@
 # reim-rs
 
-A Rust port of [ReIm](./reim), a real-time WORLD-like speech vocoder. Analyzes a
-mono signal into fundamental frequency (Fo), aperiodicity (Ap), and spectral
-envelope (Sp), then resynthesizes it. The analysis order is Silence -> Fo -> Ap
--> Sp.
+A Rust port of [ReIm](https://github.com/nakakq/reim), a real-time
+[WORLD](https://github.com/mmorise/World)-like speech vocoder by
+[@nakakq](https://github.com/nakakq). The original C implementation is included
+as a git submodule under `reim/` and serves as the correctness oracle for the
+port.
 
-The vocoder is a dependency-free library in `src/lib.rs`; `src/main.rs` is a thin
-CLI over it. Add the crate as a dependency and `use reim::Reim`, or run the
-`reim` binary directly.
+ReIm analyzes a mono signal into three acoustic features compatible with
+WORLD -- fundamental frequency (Fo), spectral envelope (Sp), and aperiodicity
+(Ap) -- then resynthesizes it. The analysis order is Silence -> Fo -> Ap -> Sp.
+
+The port is a single-file library (`src/lib.rs`) with a thin CLI (`src/main.rs`).
+Add the crate as a dependency and `use reim::Reim`, or run the `reim` binary
+directly.
 
 ## Design
 
