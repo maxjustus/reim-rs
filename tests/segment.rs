@@ -1,4 +1,4 @@
-use reim::segment::clean_contour;
+use reim::segment::{clean_contour, segment, SegmentConfig, SegmentKind};
 use reim::{Analyzer, Frame, Reim, Synthesizer};
 
 const FS: f64 = 24_000.0;
@@ -135,4 +135,100 @@ fn hz_cents_roundtrip() {
         let cleaned = clean_contour(&frames, 1);
         assert!((cleaned[0] - freq).abs() < 0.01, "freq {freq}");
     }
+}
+
+#[test]
+fn segment_constant_pitch_single_note() {
+    let frames: Vec<Frame> = (0..50)
+        .map(|_| Frame {
+            fo: 200.0,
+            voiced: true,
+            silence: false,
+            aperiodicity: vec![],
+            spectral_envelope: vec![],
+        })
+        .collect();
+    let segs = segment(&frames, &SegmentConfig::default());
+    assert_eq!(segs.len(), 1);
+    assert!(matches!(segs[0].kind, SegmentKind::Note(_)));
+    assert_eq!(segs[0].frames, 0..50);
+}
+
+#[test]
+fn segment_step_change_two_notes() {
+    let frames: Vec<Frame> = (0..100)
+        .map(|i| {
+            let fo = if i < 50 { 200.0 } else { 300.0 };
+            Frame {
+                fo,
+                voiced: true,
+                silence: false,
+                aperiodicity: vec![],
+                spectral_envelope: vec![],
+            }
+        })
+        .collect();
+    let segs = segment(&frames, &SegmentConfig::default());
+    let notes: Vec<_> = segs
+        .iter()
+        .filter(|s| matches!(s.kind, SegmentKind::Note(_)))
+        .collect();
+    assert!(
+        notes.len() >= 2,
+        "expected at least 2 notes, got {}",
+        notes.len()
+    );
+}
+
+#[test]
+fn segment_silence_is_unvoiced() {
+    let frames: Vec<Frame> = (0..20)
+        .map(|_| Frame {
+            fo: 0.0,
+            voiced: false,
+            silence: true,
+            aperiodicity: vec![],
+            spectral_envelope: vec![],
+        })
+        .collect();
+    let segs = segment(&frames, &SegmentConfig::default());
+    assert_eq!(segs.len(), 1);
+    assert!(matches!(segs[0].kind, SegmentKind::Unvoiced));
+}
+
+#[test]
+fn segment_voiced_silence_voiced() {
+    let mut frames = Vec::new();
+    for _ in 0..30 {
+        frames.push(Frame {
+            fo: 200.0,
+            voiced: true,
+            silence: false,
+            aperiodicity: vec![],
+            spectral_envelope: vec![],
+        });
+    }
+    for _ in 0..10 {
+        frames.push(Frame {
+            fo: 0.0,
+            voiced: false,
+            silence: true,
+            aperiodicity: vec![],
+            spectral_envelope: vec![],
+        });
+    }
+    for _ in 0..30 {
+        frames.push(Frame {
+            fo: 200.0,
+            voiced: true,
+            silence: false,
+            aperiodicity: vec![],
+            spectral_envelope: vec![],
+        });
+    }
+    let segs = segment(&frames, &SegmentConfig::default());
+    assert_eq!(segs.len(), 3, "expected Note, Unvoiced, Note");
+    assert!(matches!(segs[0].kind, SegmentKind::Note(_)));
+    assert!(matches!(segs[1].kind, SegmentKind::Unvoiced));
+    assert!(matches!(segs[2].kind, SegmentKind::Note(_)));
 }
