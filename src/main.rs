@@ -17,6 +17,11 @@ fn apply_voicing_env(reim: &mut Reim) {
     {
         reim.set_voicing_score_min(x);
     }
+    // REIM_SOFT_VOICING=1: continuous voicing strength at synthesis (see
+    // Reim::set_soft_voicing). Default off.
+    if std::env::var("REIM_SOFT_VOICING").as_deref() == Ok("1") {
+        reim.set_soft_voicing(true);
+    }
 }
 
 fn cmd_process(input: &str, output: &str) -> Result<(), String> {
@@ -335,7 +340,7 @@ fn cmd_features(input: &str, fmin: Option<&str>, fmax: Option<&str>) -> Result<(
     apply_voicing_env(&mut reim);
     let half = fftsize as f64 / 2.0;
     let mut last = 0u64;
-    let mut out = String::from("frame,time,silence,fo,voiced,score,nccf,cpp,prob\n");
+    let mut out = String::from("frame,time,silence,fo,voiced,score,nccf,cpp,prob,strength\n");
     for (i, &x) in wav.samples.iter().enumerate() {
         reim.process_sample(x);
         if reim.frame_count() != last {
@@ -343,7 +348,7 @@ fn cmd_features(input: &str, fmin: Option<&str>, fmax: Option<&str>) -> Result<(
             let t = ((i as f64 - half) / fs).max(0.0);
             let f = reim.last_voicing_features();
             out.push_str(&format!(
-                "{},{t:.6},{},{:.4},{},{:.6e},{:.6},{:.6},{:.6}\n",
+                "{},{t:.6},{},{:.4},{},{:.6e},{:.6},{:.6},{:.6},{:.6}\n",
                 last - 1,
                 reim.last_silence() as u8,
                 reim.last_fo(),
@@ -352,6 +357,7 @@ fn cmd_features(input: &str, fmin: Option<&str>, fmax: Option<&str>) -> Result<(
                 f.nccf,
                 f.cpp,
                 reim.last_voicing_score(),
+                reim.last_voicing_strength(),
             ));
         }
     }

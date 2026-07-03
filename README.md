@@ -287,6 +287,12 @@ the probability per frame; `reim features` dumps all voicing features as CSV.
 `reim f0` reports pitch only on frames this decision marks voiced, so the printed
 contour reflects the full voicing logic, not just the raw tracker.
 
+**Soft voicing** (`Reim::set_soft_voicing(true)`, or `REIM_SOFT_VOICING=1`; off
+by default, departs from the C reference) replaces the binary pulse/noise flip
+at synthesis with a continuous mix: pulse energy scales with the fused
+probability and noise gains exactly what pulse loses, per bin. Borderline
+frames degrade to a breathier mix instead of hard-flipping to noise.
+
 ## Performance
 
 `reim bench` on the bundled voice file (24 kHz): ~14x real time, per-frame

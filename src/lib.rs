@@ -920,6 +920,8 @@ struct ApAnalyzer {
     score_min: f64, // periodicity-gate threshold on the fused probability; 0.0 = gate off
     score_gate: SchmittGate,
     last_probability: f64,
+    soft_mode: bool,    // run D4C on borderline frames so soft synthesis has a pulse spectrum
+    last_strength: f64, // fused probability when the hard gates pass, else 0.0
 }
 
 // Hysteresis ratio for the opt-in score gate: once voiced, a frame stays voiced
@@ -1578,6 +1580,8 @@ impl ApAnalyzer {
             score_min: 0.0,
             score_gate: SchmittGate { open: false },
             last_probability: 0.0,
+            soft_mode: false,
+            last_strength: 0.0,
         }
     }
 
@@ -1630,7 +1634,14 @@ impl ApAnalyzer {
             );
         let voiced = gates_pass && score_pass;
         self.score_gate.open = voiced;
-        if voiced {
+        self.last_strength = if gates_pass {
+            self.last_probability
+        } else {
+            0.0
+        };
+        // Soft mode needs D4C on score-borderline frames too: without it the
+        // unvoiced ap = 1.0 zeroes the pulse spectrum regardless of strength.
+        if voiced || (self.soft_mode && gates_pass) {
             self.d4c
                 .analyze(input, fo, cfg.fftsize / 2, &mut ap[..numbins]);
         } else {
@@ -2127,6 +2138,7 @@ pub struct Synthesizer {
 pub struct Reim {
     analyzer: Analyzer,
     synth: Synthesizer,
+    soft_voicing: bool,
 }
 
 /// Default analysis size used by [`Reim::with_defaults`] and the `reim f0` CLI:
@@ -2278,6 +2290,19 @@ impl Analyzer {
     pub fn voicing_score(&self) -> f64 {
         self.ap.last_probability
     }
+    /// Continuous voicing strength in [0,1] for the most recent frame: the
+    /// fused probability when the hard gates (silence, fo range, rumble,
+    /// LoveTrain) pass, 0.0 otherwise. This is the value soft-voicing
+    /// synthesis consumes (see [`Reim::set_soft_voicing`]).
+    pub fn voicing_strength(&self) -> f64 {
+        self.ap.last_strength
+    }
+    /// Enable soft-voicing analysis: D4C aperiodicity is computed on
+    /// score-borderline frames (not just fully-voiced ones) so synthesis can
+    /// render them with a fractional pulse. Default off.
+    pub fn set_soft_voicing(&mut self, on: bool) {
+        self.ap.soft_mode = on;
+    }
     /// Set the minimum fused voicing probability (see
     /// [`voicing_score`](Self::voicing_score)) for a frame to be judged voiced
     /// (default 0.0 = off). Above 0 this is an opt-in, EXPERIMENTAL
@@ -2365,6 +2390,7 @@ impl Reim {
         Reim {
             analyzer: Analyzer::new(fs, period, fftsize, fo_floor, fo_ceil),
             synth: Synthesizer::new(fs, period, fftsize, fo_floor, fo_ceil),
+            soft_voicing: false,
         }
     }
 
@@ -2374,6 +2400,7 @@ impl Reim {
         Reim {
             analyzer: Analyzer::with_defaults(fs),
             synth: Synthesizer::with_defaults(fs),
+            soft_voicing: false,
         }
     }
 
@@ -2390,13 +2417,23 @@ impl Reim {
     /// synthesis). Allocation-free.
     pub fn process_sample(&mut self, input: f64) -> f64 {
         if self.analyzer.push_sample(input) {
-            self.synth.push_frame(
-                self.analyzer.fo(),
-                self.analyzer.voiced(),
-                self.analyzer.silence(),
-                self.analyzer.aperiodicity(),
-                self.analyzer.spectral_envelope(),
-            );
+            if self.soft_voicing {
+                self.synth.push_frame_with_strength(
+                    self.analyzer.fo(),
+                    self.analyzer.voicing_strength(),
+                    self.analyzer.silence(),
+                    self.analyzer.aperiodicity(),
+                    self.analyzer.spectral_envelope(),
+                );
+            } else {
+                self.synth.push_frame(
+                    self.analyzer.fo(),
+                    self.analyzer.voiced(),
+                    self.analyzer.silence(),
+                    self.analyzer.aperiodicity(),
+                    self.analyzer.spectral_envelope(),
+                );
+            }
         }
         self.synth.next_sample()
     }
@@ -2449,6 +2486,21 @@ impl Reim {
     /// [`Analyzer::voicing_score`].
     pub fn last_voicing_score(&self) -> f64 {
         self.analyzer.voicing_score()
+    }
+    /// Continuous voicing strength for the most recent frame. See
+    /// [`Analyzer::voicing_strength`].
+    pub fn last_voicing_strength(&self) -> f64 {
+        self.analyzer.voicing_strength()
+    }
+    /// Enable soft voicing (default off; departs from the C reference):
+    /// synthesis scales pulse energy by a continuous voicing strength — the
+    /// fused probability ([`last_voicing_score`](Self::last_voicing_score))
+    /// when the hard gates pass — instead of the binary voiced flag, so
+    /// borderline frames degrade to a noisier mix rather than flipping
+    /// hard between pulse and noise.
+    pub fn set_soft_voicing(&mut self, on: bool) {
+        self.soft_voicing = on;
+        self.analyzer.set_soft_voicing(on);
     }
     /// Set the minimum fused voicing probability for a frame to be judged
     /// voiced (default 0.0 = off). See [`Analyzer::set_voicing_score_min`].
@@ -2598,7 +2650,7 @@ impl Reim {
         let (mut t_pulse_gen, mut pulse_gen_count) = (0.0, 0usize);
         let mut frame_latencies = Vec::new();
         for &x in samples {
-            let Reim { analyzer, synth } = &mut r;
+            let Reim { analyzer, synth, .. } = &mut r;
             if analyzer.framer.next(x, &mut analyzer.frame_window) {
                 let frame_t0 = Instant::now();
                 let (wave_d, wave) = (
@@ -2882,7 +2934,7 @@ mod tests {
         let fs = 24000.0;
         let mut synth = Synthesizer::with_defaults(fs);
         let numbins = synth.cfg.numbins;
-        let ap: Vec<f64> = (0..numbins).map(|k| (k as f64 / numbins as f64)).collect();
+        let ap: Vec<f64> = (0..numbins).map(|k| k as f64 / numbins as f64).collect();
         let sp: Vec<f64> = (0..numbins).map(|k| 1.0 / (1.0 + k as f64)).collect();
         for &strength in &[0.0, 0.25, 0.5, 0.9, 1.0] {
             // Silence path skips the min-phase transform, leaving the raw
