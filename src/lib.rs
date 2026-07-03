@@ -2050,6 +2050,17 @@ impl Synth {
 /// Streaming analyzer: framer + Fo/Ap/Sp analyzers and their per-frame buffers.
 /// Push input samples; on each frame boundary the per-frame WORLD parameters
 /// become readable via the accessors. Allocation-free steady state.
+/// Raw per-frame features feeding the voicing decision: `score` is the SRH
+/// harmonic score (unbounded, orders of magnitude between noise and voice),
+/// `nccf` the normalized autocorrelation at the detected pitch lag (~1 =
+/// periodic), `cpp` the cepstral peak prominence (log-power units).
+#[derive(Clone, Copy, Debug)]
+pub struct VoicingFeatures {
+    pub score: f64,
+    pub nccf: f64,
+    pub cpp: f64,
+}
+
 pub struct Analyzer {
     cfg: Config,
     fft: Fft,
@@ -2212,6 +2223,16 @@ impl Analyzer {
     pub fn spectral_envelope(&self) -> &[f64] {
         &self.sp_buf
     }
+    /// Per-frame voicing features for the most recent frame. These are raw
+    /// inputs to the voicing decision, useful for offline analysis/fitting;
+    /// none of them is gated on `voiced()`.
+    pub fn voicing_features(&self) -> VoicingFeatures {
+        VoicingFeatures {
+            score: self.fo.last_score,
+            nccf: self.fo.last_nccf,
+            cpp: self.fo.last_cpp,
+        }
+    }
     /// Set the minimum SRH harmonic score for a frame to be judged voiced
     /// (default 0.0 = off). Above 0 this is an opt-in, EXPERIMENTAL periodicity
     /// gate: the Fo tracker returns a candidate even on breath/noise, and true
@@ -2350,6 +2371,11 @@ impl Reim {
     /// that advances `frame_count`).
     pub fn last_spectral_envelope(&self) -> &[f64] {
         self.analyzer.spectral_envelope()
+    }
+    /// Per-frame voicing features for the most recent frame. See
+    /// [`Analyzer::voicing_features`].
+    pub fn last_voicing_features(&self) -> VoicingFeatures {
+        self.analyzer.voicing_features()
     }
     /// Set the minimum SRH harmonic score for a frame to be judged voiced
     /// (default 0.0 = off). See [`Analyzer::set_voicing_score_min`].

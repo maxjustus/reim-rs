@@ -322,6 +322,41 @@ fn cmd_f0(
     Ok(())
 }
 
+// Emit per-frame voicing features as headered CSV for offline analysis and
+// fusion-weight fitting. Same framing/timing as `f0`.
+fn cmd_features(input: &str, fmin: Option<&str>, fmax: Option<&str>) -> Result<(), String> {
+    let fo_floor: f64 = fmin.unwrap_or("71").parse().map_err(|_| "bad fmin")?;
+    let fo_ceil: f64 = fmax.unwrap_or("800").parse().map_err(|_| "bad fmax")?;
+    let wav = read_wav(input)?;
+    let fs = wav.sample_rate as f64;
+    let fftsize = default_fftsize(fs, fo_floor);
+    let mut reim = Reim::new(fs, 5.0, fftsize, fo_floor, fo_ceil);
+    apply_voicing_env(&mut reim);
+    let half = fftsize as f64 / 2.0;
+    let mut last = 0u64;
+    let mut out = String::from("frame,time,silence,fo,voiced,score,nccf,cpp\n");
+    for (i, &x) in wav.samples.iter().enumerate() {
+        reim.process_sample(x);
+        if reim.frame_count() != last {
+            last = reim.frame_count();
+            let t = ((i as f64 - half) / fs).max(0.0);
+            let f = reim.last_voicing_features();
+            out.push_str(&format!(
+                "{},{t:.6},{},{:.4},{},{:.6e},{:.6},{:.6}\n",
+                last - 1,
+                reim.last_silence() as u8,
+                reim.last_fo(),
+                reim.last_voiced() as u8,
+                f.score,
+                f.nccf,
+                f.cpp,
+            ));
+        }
+    }
+    print!("{out}");
+    Ok(())
+}
+
 // Dump per-frame aperiodicity as raw little-endian f64: frame_count rows of
 // (fftsize/2 + 1) bins each. For comparing the analyzer against a reference.
 fn cmd_ap(input: &str, output: &str) -> Result<(), String> {
@@ -350,6 +385,7 @@ fn usage() -> ! {
     eprintln!("  reim eval <ref.wav> <in.wav> [feat.csv]");
     eprintln!("  reim bench [in.wav]");
     eprintln!("  reim f0 <in.wav> [fmin] [fmax] [fftsize]");
+    eprintln!("  reim features <in.wav> [fmin] [fmax]");
     eprintln!("  reim ap <in.wav> <out.f64>");
     std::process::exit(2);
 }
@@ -367,6 +403,11 @@ fn main() {
             args.get(3).map(|s| s.as_str()),
             args.get(4).map(|s| s.as_str()),
             args.get(5).map(|s| s.as_str()),
+        ),
+        Some("features") if args.len() >= 3 => cmd_features(
+            &args[2],
+            args.get(3).map(|s| s.as_str()),
+            args.get(4).map(|s| s.as_str()),
         ),
         Some("ap") if args.len() == 4 => cmd_ap(&args[2], &args[3]),
         _ => usage(),
