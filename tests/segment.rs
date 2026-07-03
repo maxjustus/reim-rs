@@ -1,4 +1,6 @@
-use reim::segment::{clean_contour, decompose_contour, segment, SegmentConfig, SegmentKind};
+use reim::segment::{
+    clean_contour, contour_svg, decompose_contour, segment, SegmentConfig, SegmentKind,
+};
 use reim::{Analyzer, Frame, Reim, Synthesizer};
 
 const FS: f64 = 24_000.0;
@@ -406,6 +408,51 @@ fn decompose_ramped_vibrato() {
     assert!(
         corr > 0.85,
         "ramped vibrato amplitude correlation: {corr} (need >0.85)"
+    );
+}
+
+#[test]
+fn contour_svg_structural() {
+    let frames: Vec<Frame> = (0..100)
+        .map(|i| {
+            if i < 40 {
+                Frame {
+                    fo: 220.0,
+                    voiced: true,
+                    silence: false,
+                    aperiodicity: vec![],
+                    spectral_envelope: vec![],
+                }
+            } else if i < 60 {
+                Frame {
+                    fo: 0.0,
+                    voiced: false,
+                    silence: true,
+                    aperiodicity: vec![],
+                    spectral_envelope: vec![],
+                }
+            } else {
+                Frame {
+                    fo: 330.0,
+                    voiced: true,
+                    silence: false,
+                    aperiodicity: vec![],
+                    spectral_envelope: vec![],
+                }
+            }
+        })
+        .collect();
+    let config = SegmentConfig::default();
+    let segs = segment(&frames, 200.0, &config);
+    let svg = contour_svg(&frames, &segs, 200.0, None);
+
+    assert!(svg.starts_with("<svg"), "should start with <svg tag");
+    assert!(svg.contains("</svg>"), "should have closing svg tag");
+    assert!(svg.contains("circle"), "should have Fo dots (circles)");
+    assert!(svg.contains("rect"), "should have unvoiced shading (rects)");
+    assert!(
+        svg.contains("polyline") || svg.contains("line"),
+        "should have contour lines"
     );
 }
 

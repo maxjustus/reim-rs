@@ -344,6 +344,72 @@ fn cmd_ap(input: &str, output: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_segment(input: &str, svg_output: Option<&str>) -> Result<(), String> {
+    let wav = read_wav(input)?;
+    let fs = wav.sample_rate as f64;
+    let mut analyzer = reim::Analyzer::with_defaults(fs);
+    let frames = analyzer.analyze_to_frames(&wav.samples);
+    let config = reim::segment::SegmentConfig::default();
+    let period_ms = 5.0;
+    let frame_rate = 1000.0 / period_ms;
+    let segments = reim::segment::segment(&frames, frame_rate, &config);
+
+    println!("segments: {}", segments.len());
+    println!(
+        "{:<8} {:<8} {:<8} {:<12} {:<10} {:<8} {:<8} {:<8} {:<8}",
+        "start", "end", "type", "center", "vib_rate", "vib_amp", "drift%", "vib%", "res%"
+    );
+
+    for seg in &segments {
+        let start_ms = seg.frames.start as f64 * period_ms;
+        let end_ms = seg.frames.end as f64 * period_ms;
+        match &seg.kind {
+            reim::segment::SegmentKind::Note(c) => {
+                let (d_frac, v_frac, r_frac) = reim::segment::variance_explained(c);
+                let mean_amp = if c.vibrato_amp.is_empty() {
+                    0.0
+                } else {
+                    c.vibrato_amp.iter().sum::<f64>() / c.vibrato_amp.len() as f64
+                };
+                let midi = 69.0 + c.center_cents / 100.0;
+                let midi_round = midi.round() as i32;
+                let names = [
+                    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+                ];
+                let note = ((midi_round % 12) + 12) % 12;
+                let oct = midi_round / 12 - 1;
+                let cents_off = c.center_cents - (midi_round as f64 - 69.0) * 100.0;
+                let note_str = format!("{}{}{:+.0}c", names[note as usize], oct, cents_off);
+                println!(
+                    "{:<8.0} {:<8.0} {:<8} {:<12} {:<10.1} {:<8.1} {:<8.0} {:<8.0} {:<8.0}",
+                    start_ms,
+                    end_ms,
+                    "Note",
+                    note_str,
+                    c.vibrato_rate_hz,
+                    mean_amp,
+                    d_frac * 100.0,
+                    v_frac * 100.0,
+                    r_frac * 100.0
+                );
+            }
+            reim::segment::SegmentKind::Unvoiced => {
+                println!(
+                    "{:<8.0} {:<8.0} {:<8} {:<12} {:<10} {:<8} {:<8} {:<8} {:<8}",
+                    start_ms, end_ms, "Unvoiced", "-", "-", "-", "-", "-", "-"
+                );
+            }
+        }
+    }
+
+    if let Some(svg_path) = svg_output {
+        let svg = reim::segment::contour_svg(&frames, &segments, frame_rate, None);
+        std::fs::write(svg_path, &svg).map_err(|e| format!("write {svg_path}: {e}"))?;
+        println!("wrote contour SVG: {svg_path}");
+    }
+    Ok(())
+}
+
 fn usage() -> ! {
     eprintln!("usage:");
     eprintln!("  reim process <in.wav> <out.wav>");
@@ -351,6 +417,7 @@ fn usage() -> ! {
     eprintln!("  reim bench [in.wav]");
     eprintln!("  reim f0 <in.wav> [fmin] [fmax] [fftsize]");
     eprintln!("  reim ap <in.wav> <out.f64>");
+    eprintln!("  reim segment <in.wav> [contour.svg]");
     std::process::exit(2);
 }
 
@@ -369,6 +436,9 @@ fn main() {
             args.get(5).map(|s| s.as_str()),
         ),
         Some("ap") if args.len() == 4 => cmd_ap(&args[2], &args[3]),
+        Some("segment") if args.len() >= 3 => {
+            cmd_segment(&args[2], args.get(3).map(|s| s.as_str()))
+        }
         _ => usage(),
     };
     if let Err(e) = result {

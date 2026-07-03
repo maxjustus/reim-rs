@@ -1,4 +1,5 @@
 use std::f64::consts::PI;
+use std::fmt::Write;
 use std::ops::Range;
 
 use rustfft::num_complex::Complex;
@@ -461,4 +462,252 @@ pub fn segment(frames: &[Frame], frame_rate_hz: f64, config: &SegmentConfig) -> 
     }
 
     segments
+}
+
+fn note_name(cents: f64) -> String {
+    let midi = (69.0 + cents / 100.0).round() as i32;
+    const NAMES: [&str; 12] = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
+    format!(
+        "{}{}",
+        NAMES[midi.rem_euclid(12) as usize],
+        midi.div_euclid(12) - 1
+    )
+}
+
+pub fn variance_explained(contour: &NoteContour) -> (f64, f64, f64) {
+    let n = contour.drift.len();
+    if n == 0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let total_var: f64 = contour
+        .drift
+        .iter()
+        .zip(contour.vibrato_amp.iter().zip(contour.vibrato_phase.iter()))
+        .zip(contour.residual.iter())
+        .map(|((d, (a, p)), r)| {
+            let v = d + a * p.sin() + r;
+            v * v
+        })
+        .sum::<f64>()
+        / n as f64;
+    if total_var < 1e-10 {
+        return (0.0, 0.0, 0.0);
+    }
+    let drift_var = contour.drift.iter().map(|d| d * d).sum::<f64>() / n as f64;
+    let vib_var = contour
+        .vibrato_amp
+        .iter()
+        .zip(contour.vibrato_phase.iter())
+        .map(|(a, p)| {
+            let v = a * p.sin();
+            v * v
+        })
+        .sum::<f64>()
+        / n as f64;
+    let res_var = contour.residual.iter().map(|r| r * r).sum::<f64>() / n as f64;
+    let sum = drift_var + vib_var + res_var;
+    (drift_var / sum, vib_var / sum, res_var / sum)
+}
+
+pub fn contour_svg(
+    frames: &[Frame],
+    segments: &[Segment],
+    frame_rate_hz: f64,
+    overlay: Option<&[f64]>,
+) -> String {
+    let (w, h) = (1200.0_f64, 600.0_f64);
+    let (pl, pr, pt, pb) = (60.0, 20.0, 20.0, 40.0);
+    let (pw, ph) = (w - pl - pr, h - pt - pb);
+
+    // Y-axis range from voiced frames
+    let mut c_min = f64::INFINITY;
+    let mut c_max = f64::NEG_INFINITY;
+    for f in frames {
+        if f.voiced && f.fo > 0.0 {
+            let c = hz_to_cents(f.fo);
+            c_min = c_min.min(c);
+            c_max = c_max.max(c);
+        }
+    }
+    if !c_min.is_finite() {
+        c_min = -1200.0;
+        c_max = 1200.0;
+    }
+    c_min -= 200.0;
+    c_max += 200.0;
+    let x_max = if frames.is_empty() {
+        1.0
+    } else {
+        frames.len() as f64 / frame_rate_hz
+    };
+
+    let px = |t: f64| pl + t / x_max * pw;
+    let py = |c: f64| pt + (c_max - c) / (c_max - c_min) * ph;
+
+    let mut s = String::with_capacity(16384);
+    let _ = write!(
+        s,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" \
+         viewBox=\"0 0 {w} {h}\" width=\"{w}\" height=\"{h}\">\n\
+         <rect width=\"{w}\" height=\"{h}\" fill=\"white\"/>\n"
+    );
+
+    // 1. Unvoiced shading + segment boundaries
+    for seg in segments {
+        let x0 = px(seg.frames.start as f64 / frame_rate_hz);
+        let x1 = px(seg.frames.end as f64 / frame_rate_hz);
+        if matches!(seg.kind, SegmentKind::Unvoiced) {
+            let _ = writeln!(
+                s,
+                "<rect x=\"{x0:.1}\" y=\"{pt:.1}\" width=\"{:.1}\" \
+                 height=\"{ph:.1}\" fill=\"#eee\"/>",
+                x1 - x0
+            );
+        }
+        let _ = writeln!(
+            s,
+            "<line x1=\"{x0:.1}\" y1=\"{pt:.1}\" x2=\"{x0:.1}\" y2=\"{:.1}\" \
+             stroke=\"#999\" stroke-dasharray=\"4,4\"/>",
+            pt + ph
+        );
+    }
+    if let Some(last) = segments.last() {
+        let x = px(last.frames.end as f64 / frame_rate_hz);
+        let _ = writeln!(
+            s,
+            "<line x1=\"{x:.1}\" y1=\"{pt:.1}\" x2=\"{x:.1}\" y2=\"{:.1}\" \
+             stroke=\"#999\" stroke-dasharray=\"4,4\"/>",
+            pt + ph
+        );
+    }
+
+    // 2. Semitone gridlines with note names
+    let first = (c_min / 100.0).ceil() as i32;
+    let last = (c_max / 100.0).floor() as i32;
+    for semi in first..=last {
+        let c = semi as f64 * 100.0;
+        let y = py(c);
+        let _ = write!(
+            s,
+            "<line x1=\"{pl:.1}\" y1=\"{y:.1}\" x2=\"{:.1}\" y2=\"{y:.1}\" stroke=\"#ddd\"/>\n\
+             <text x=\"{:.0}\" y=\"{y:.1}\" font-size=\"9\" fill=\"#666\" \
+             text-anchor=\"end\" dominant-baseline=\"middle\">{}</text>\n",
+            pl + pw,
+            pl - 4.0,
+            note_name(c)
+        );
+    }
+
+    // 3. Raw Fo dots
+    for (i, f) in frames.iter().enumerate() {
+        if f.voiced && f.fo > 0.0 {
+            let (x, y) = (px(i as f64 / frame_rate_hz), py(hz_to_cents(f.fo)));
+            let _ = writeln!(
+                s,
+                "<circle cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"2\" fill=\"#69b\"/>"
+            );
+        }
+    }
+
+    // 4-6. Per-note contour lines
+    let mut pts = String::new();
+    for seg in segments {
+        let SegmentKind::Note(ref nc) = seg.kind else {
+            continue;
+        };
+        let t0 = seg.frames.start as f64 / frame_rate_hz;
+        let t1 = seg.frames.end.saturating_sub(1).max(seg.frames.start) as f64 / frame_rate_hz;
+
+        // 4. Center line (green)
+        let yc = py(nc.center_cents);
+        let _ = writeln!(
+            s,
+            "<line x1=\"{:.1}\" y1=\"{yc:.1}\" x2=\"{:.1}\" y2=\"{yc:.1}\" \
+             stroke=\"#2a2\" stroke-width=\"1.5\"/>",
+            px(t0),
+            px(t1)
+        );
+
+        // 5. Center + drift (orange polyline)
+        pts.clear();
+        for (j, d) in nc.drift.iter().enumerate() {
+            let _ = write!(
+                pts,
+                "{:.1},{:.1} ",
+                px((seg.frames.start + j) as f64 / frame_rate_hz),
+                py(nc.center_cents + d)
+            );
+        }
+        let _ = writeln!(
+            s,
+            "<polyline points=\"{}\" fill=\"none\" stroke=\"#c80\" stroke-width=\"1.2\"/>",
+            pts.trim_end()
+        );
+
+        // 6. Full reconstruction (red polyline)
+        pts.clear();
+        for j in 0..nc.drift.len() {
+            let c = nc.center_cents + nc.drift[j] + nc.vibrato_amp[j] * nc.vibrato_phase[j].sin();
+            let _ = write!(
+                pts,
+                "{:.1},{:.1} ",
+                px((seg.frames.start + j) as f64 / frame_rate_hz),
+                py(c)
+            );
+        }
+        let _ = writeln!(
+            s,
+            "<polyline points=\"{}\" fill=\"none\" stroke=\"#d22\" stroke-width=\"1\"/>",
+            pts.trim_end()
+        );
+    }
+
+    // 7. Overlay track (purple)
+    if let Some(ov) = overlay {
+        pts.clear();
+        for (i, &v) in ov.iter().enumerate() {
+            if v > 0.0 {
+                let _ = write!(
+                    pts,
+                    "{:.1},{:.1} ",
+                    px(i as f64 / frame_rate_hz),
+                    py(hz_to_cents(v))
+                );
+            }
+        }
+        let trimmed = pts.trim_end();
+        if !trimmed.is_empty() {
+            let _ = writeln!(
+                s,
+                "<polyline points=\"{trimmed}\" fill=\"none\" stroke=\"#82d\" stroke-width=\"1\"/>"
+            );
+        }
+    }
+
+    // X-axis time labels
+    let step = if x_max <= 1.0 {
+        0.1
+    } else if x_max <= 5.0 {
+        0.5
+    } else if x_max <= 20.0 {
+        1.0
+    } else {
+        5.0
+    };
+    let mut t = 0.0;
+    while t <= x_max + 1e-9 {
+        let _ = writeln!(
+            s,
+            "<text x=\"{:.1}\" y=\"{:.0}\" font-size=\"10\" fill=\"#666\" \
+             text-anchor=\"middle\">{t:.1}s</text>",
+            px(t),
+            h - 5.0
+        );
+        t += step;
+    }
+
+    s.push_str("</svg>\n");
+    s
 }
