@@ -36,6 +36,8 @@
     clippy::manual_range_contains
 )]
 
+pub mod segment;
+
 // The reference C code uses a *truncated* pi literal. Reproduce it exactly so the
 // windowing/phase math matches the C bit-for-bit where the FFT allows. The allow
 // is scoped to this one literal so approx_constant stays deny-by-default elsewhere.

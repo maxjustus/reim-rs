@@ -1,3 +1,4 @@
+use reim::segment::clean_contour;
 use reim::{Analyzer, Frame, Reim, Synthesizer};
 
 const FS: f64 = 24_000.0;
@@ -64,4 +65,74 @@ fn frame_identity_roundtrip() {
         snr > 120.0,
         "identity round-trip SNR too low: {snr:.1} dB (need >120 dB)"
     );
+}
+
+#[test]
+fn clean_contour_suppresses_octave_jump() {
+    let frames: Vec<Frame> = (0..10)
+        .map(|i| Frame {
+            fo: if i == 5 { 400.0 } else { 200.0 },
+            voiced: true,
+            silence: false,
+            aperiodicity: vec![],
+            spectral_envelope: vec![],
+        })
+        .collect();
+    let cleaned = clean_contour(&frames, 5);
+    for (i, &val) in cleaned.iter().enumerate() {
+        assert!(
+            (val - 200.0).abs() < 1.0,
+            "frame {i}: expected ~200, got {val}"
+        );
+    }
+}
+
+#[test]
+fn clean_contour_passes_constant_pitch() {
+    let frames: Vec<Frame> = (0..20)
+        .map(|_| Frame {
+            fo: 300.0,
+            voiced: true,
+            silence: false,
+            aperiodicity: vec![],
+            spectral_envelope: vec![],
+        })
+        .collect();
+    let cleaned = clean_contour(&frames, 5);
+    for &val in &cleaned {
+        assert!((val - 300.0).abs() < 0.01);
+    }
+}
+
+#[test]
+fn clean_contour_unvoiced_zero() {
+    let frames: Vec<Frame> = (0..5)
+        .map(|_| Frame {
+            fo: 0.0,
+            voiced: false,
+            silence: true,
+            aperiodicity: vec![],
+            spectral_envelope: vec![],
+        })
+        .collect();
+    let cleaned = clean_contour(&frames, 5);
+    for &val in &cleaned {
+        assert_eq!(val, 0.0);
+    }
+}
+
+#[test]
+fn hz_cents_roundtrip() {
+    let test_freqs = [100.0, 200.0, 440.0, 880.0, 1000.0];
+    for &freq in &test_freqs {
+        let frames = vec![Frame {
+            fo: freq,
+            voiced: true,
+            silence: false,
+            aperiodicity: vec![],
+            spectral_envelope: vec![],
+        }];
+        let cleaned = clean_contour(&frames, 1);
+        assert!((cleaned[0] - freq).abs() < 0.01, "freq {freq}");
+    }
 }
