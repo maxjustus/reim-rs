@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
-"""Sung-pitch accuracy of reim's F0 tracker on the Vocadito dataset.
+"""Pitch/voicing accuracy of reim's F0 tracker on Vocadito and PTDB-TUG.
 
-Runs `reim f0` on each clip, aligns its 5 ms grid against Vocadito's ~5.8 ms
+Runs `reim f0` on each clip, aligns its 5 ms grid against the dataset's
 ground-truth grid via mir_eval.melody (which does the cents conversion, time
 resampling, and voicing handling for us), and reports the standard melody
 metrics plus a voicing precision/recall/F1 comparable to the Vocadito paper's
 F1 ~= 0.86.
+
+Datasets (--dataset vocadito|ptdb|all):
+  vocadito  /private/tmp/datasets/vocadito_raw    44.1 kHz solo singing
+  ptdb      /private/tmp/datasets/ptdb_tug        48 kHz English speech,
+            laryngograph-derived RAPT reference (10 ms hop, .f0 4-column)
+
+Noise conditions (--noise none|white20|white10|hum50|all) are mixed on the fly
+into temp wavs (seeded per clip, deterministic): white noise at 20/10 dB SNR
+and 50 Hz mains hum + harmonics at -20 dB relative to signal RMS.
+
+--sweep v1,v2,... re-runs the pooled eval per REIM_VOICING_SCORE_MIN value.
 
 The RPA-vs-RCA gap is the octave-error signature: RCA is octave-invariant, so
 RPA << RCA means the tracker is landing on the right pitch class but the wrong
@@ -27,6 +38,7 @@ import csv
 import subprocess
 import sys
 import warnings
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +59,9 @@ FMAX_HZ = 800.0
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REIM = REPO_ROOT / "target" / "release" / "reim"
 DEFAULT_DATA_DIR = Path("/private/tmp/datasets/vocadito_raw")
+PTDB_DATA_DIR = Path("/private/tmp/datasets/ptdb_tug")
+
+NOISE_CONDITIONS = ("none", "white20", "white10", "hum50")
 
 
 def run_reim_f0(reim_bin, wav_path):
@@ -120,10 +135,9 @@ def voicing_prf(ref_time, ref_freq, est_time, est_freq):
     return {"voicing_precision": precision, "voicing_recall": recall, "voicing_f1": f1}
 
 
-def eval_clip(reim_bin, wav_path, ref_csv_path):
+def eval_clip(reim_bin, wav_path, ref_time, ref_freq):
     """Full metric bundle for one clip."""
     cmd, (est_time, est_freq) = run_reim_f0(reim_bin, wav_path)
-    ref_time, ref_freq = load_ref_csv(ref_csv_path)
     scores = melody.evaluate(ref_time, ref_freq, est_time, est_freq)
     metrics = {
         "rpa": scores["Raw Pitch Accuracy"],
@@ -149,6 +163,71 @@ def discover_clips(data_dir):
     return clips
 
 
+def load_vocadito(data_dir):
+    """Yield (clip_id, wav_path, ref_time, ref_freq) for every Vocadito clip."""
+    for clip_id, wav, ref in discover_clips(data_dir):
+        ref_time, ref_freq = load_ref_csv(ref)
+        yield clip_id, wav, ref_time, ref_freq
+
+
+def load_ptdb(data_dir):
+    """Yield (clip_id, wav_path, ref_time, ref_freq) for every PTDB-TUG clip.
+
+    Layout: SPEECH DATA/{FEMALE,MALE}/MIC/<spk>/mic_<spk>_<utt>.wav with the
+    RAPT reference at .../REF/<spk>/ref_<spk>_<utt>.f0. The .f0 file is ASCII,
+    4 whitespace columns [f0_hz, voicing_flag, rms, ac_peak], no time column,
+    10 ms hop; f0=0 marks unvoiced frames. Frame i is stamped at the center of
+    its 32 ms RAPT window (i*10ms + 16ms); without that offset RPA drops ~40
+    points from pure misalignment.
+    """
+    root = data_dir / "SPEECH DATA"
+    for wav in sorted(root.glob("*/MIC/*/mic_*.wav")):
+        ref = Path(str(wav.parent).replace("/MIC/", "/REF/")) / wav.name.replace(
+            "mic_", "ref_"
+        ).replace(".wav", ".f0")
+        if not ref.exists():
+            continue
+        f0 = np.array([float(line.split()[0]) for line in ref.read_text().splitlines() if line.split()])
+        yield wav.stem, wav, np.arange(len(f0)) * 0.010 + 0.016, f0
+
+
+DATASETS = {
+    "vocadito": (load_vocadito, DEFAULT_DATA_DIR),
+    "ptdb": (load_ptdb, PTDB_DATA_DIR),
+}
+
+
+def add_noise(wav_path, condition, seed):
+    """Return a path to a noisy copy of wav_path (a temp file the caller must
+    unlink), or wav_path itself for condition "none"."""
+    if condition == "none":
+        return Path(wav_path)
+    import os
+    import tempfile
+
+    import soundfile as sf
+
+    x, fs = sf.read(wav_path, dtype="float64")
+    rms = float(np.sqrt(np.mean(x**2))) or 1.0
+    rng = np.random.default_rng(seed)
+    if condition in ("white20", "white10"):
+        snr_db = 20.0 if condition == "white20" else 10.0
+        noise = rng.standard_normal(len(x)) * rms / (10 ** (snr_db / 20.0))
+    elif condition == "hum50":
+        t = np.arange(len(x)) / fs
+        hum = sum(
+            np.sin(2 * np.pi * 50.0 * h * t + rng.uniform(0, 2 * np.pi)) / h
+            for h in (1, 2, 3)
+        )
+        noise = hum * rms * 10 ** (-20.0 / 20.0)
+    else:
+        raise ValueError(condition)
+    fd, tmp = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    sf.write(tmp, x + noise, fs, subtype="FLOAT")
+    return Path(tmp)
+
+
 def _clip_sort_key(p):
     """Sort vocadito_2 before vocadito_10 by numeric suffix."""
     try:
@@ -158,6 +237,7 @@ def _clip_sort_key(p):
 
 
 # ---- metric column layout for the summary table ----
+LABEL_WIDTH = 30
 COLUMNS = [
     ("rpa", "RPA"),
     ("rca", "RCA"),
@@ -189,33 +269,55 @@ def aggregate(per_clip):
     }
 
 
-def run_dataset(reim_bin, data_dir, limit=None):
-    clips = discover_clips(data_dir)
-    if limit is not None:
-        clips = clips[:limit]
-    if not clips:
-        print(f"No Vocadito clips found under {data_dir}", file=sys.stderr)
-        return 1
-
-    per_clip = []
+def run_datasets(reim_bin, datasets, conditions, limit=None, quiet=False):
+    """Evaluate every (dataset, noise condition) group; returns the pooled
+    per-clip rows, or None when no clips were found. Prints per-group tables
+    and a pooled MEAN unless quiet."""
+    pooled = []
     invocation_printed = False
-    for clip_id, wav, ref in clips:
-        cmd, metrics = eval_clip(reim_bin, wav, ref)
-        if not invocation_printed:
-            print("reim invocation: " + " ".join(cmd))
+    for ds_name in datasets:
+        loader, data_dir = DATASETS[ds_name]
+        clips = list(loader(data_dir))
+        if limit is not None:
+            clips = clips[:limit]
+        if not clips:
+            print(f"No {ds_name} clips found under {data_dir}", file=sys.stderr)
+            continue
+        for cond in conditions:
+            group = []
+            for clip_id, wav, ref_time, ref_freq in clips:
+                noisy = add_noise(wav, cond, seed=zlib.crc32(clip_id.encode()))
+                try:
+                    cmd, metrics = eval_clip(reim_bin, noisy, ref_time, ref_freq)
+                finally:
+                    if noisy != Path(wav):
+                        noisy.unlink(missing_ok=True)
+                if not invocation_printed and not quiet:
+                    print("reim invocation: " + " ".join(cmd))
+                    print()
+                    invocation_printed = True
+                label = clip_id if cond == "none" and len(datasets) == 1 else f"{ds_name}/{cond}:{clip_id}"
+                group.append((label, metrics))
+            pooled.extend(group)
+            if not quiet:
+                print_table(group, label_width=LABEL_WIDTH)
+                print("-" * (LABEL_WIDTH + 8 * len(COLUMNS)))
+                print_table(
+                    [(f"MEAN {ds_name}/{cond}", aggregate(group))],
+                    label_width=LABEL_WIDTH,
+                )
+                print()
+    if not pooled:
+        return None
+    if not quiet:
+        if len(datasets) * len(conditions) > 1:
+            print_table([("MEAN pooled", aggregate(pooled))], label_width=LABEL_WIDTH)
             print()
-            invocation_printed = True
-        per_clip.append((clip_id, metrics))
-
-    print_table(per_clip)
-    print("-" * (16 + 8 * len(COLUMNS)))
-    print_table([("MEAN", aggregate(per_clip))])
-    print()
-    print(
-        "RPA-RCA gap (octave-error signature): "
-        f"{aggregate(per_clip)['rca'] - aggregate(per_clip)['rpa']:.3f}"
-    )
-    return 0
+        print(
+            "RPA-RCA gap (octave-error signature): "
+            f"{aggregate(pooled)['rca'] - aggregate(pooled)['rpa']:.3f}"
+        )
+    return pooled
 
 
 # --------------------------------------------------------------------------
@@ -319,6 +421,25 @@ def main(argv=None):
         help="Only evaluate the first N clips (smoke runs).",
     )
     parser.add_argument(
+        "--dataset",
+        choices=[*DATASETS, "all"],
+        default="vocadito",
+        help="Which dataset(s) to evaluate.",
+    )
+    parser.add_argument(
+        "--noise",
+        choices=[*NOISE_CONDITIONS, "all"],
+        default="none",
+        help="Noise condition mixed into each clip on the fly.",
+    )
+    parser.add_argument(
+        "--sweep",
+        type=str,
+        default=None,
+        help="Comma-separated REIM_VOICING_SCORE_MIN values; prints a pooled "
+        "metric row per value instead of the full tables.",
+    )
+    parser.add_argument(
         "--self-test",
         action="store_true",
         help="Run the synthetic correctness self-test and exit.",
@@ -328,18 +449,38 @@ def main(argv=None):
     if args.self_test:
         return self_test()
 
-    # If the dataset is absent (e.g. ephemeral /tmp), still prove correctness
-    # via the self-test and exit 0 rather than failing.
-    audio_dir = args.data_dir / "Audio"
-    if not audio_dir.is_dir():
-        print(f"Dataset not found at {args.data_dir}; running self-test only.\n")
+    datasets = list(DATASETS) if args.dataset == "all" else [args.dataset]
+    conditions = list(NOISE_CONDITIONS) if args.noise == "all" else [args.noise]
+    if args.data_dir != DEFAULT_DATA_DIR and len(datasets) == 1:
+        DATASETS[datasets[0]] = (DATASETS[datasets[0]][0], args.data_dir)
+
+    # If every requested dataset is absent (e.g. ephemeral /tmp), still prove
+    # correctness via the self-test and exit 0 rather than failing.
+    if not any(DATASETS[d][1].is_dir() for d in datasets):
+        print("Dataset(s) not found; running self-test only.\n")
         return self_test()
 
     if not args.reim.exists():
         print(f"reim binary not found at {args.reim}", file=sys.stderr)
         return 2
 
-    return run_dataset(args.reim, args.data_dir, limit=args.limit)
+    if args.sweep is not None:
+        import os
+
+        print("score_min".ljust(LABEL_WIDTH) + "".join(n.rjust(8) for _, n in COLUMNS))
+        for v in args.sweep.split(","):
+            os.environ["REIM_VOICING_SCORE_MIN"] = v
+            pooled = run_datasets(
+                args.reim, datasets, conditions, limit=args.limit, quiet=True
+            )
+            if pooled is None:
+                return 1
+            m = aggregate(pooled)
+            print(v.ljust(LABEL_WIDTH) + "".join(f"{m[k]:8.3f}" for k, _ in COLUMNS))
+        return 0
+
+    pooled = run_datasets(args.reim, datasets, conditions, limit=args.limit)
+    return 0 if pooled is not None else 1
 
 
 if __name__ == "__main__":
