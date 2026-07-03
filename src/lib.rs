@@ -546,8 +546,12 @@ struct FoAnalyzer {
     spec_filt_i: Vec<f64>,
     filtered_r: Vec<f64>,
     filtered_i: Vec<f64>,
+    cep_r: Vec<f64>,
+    cep_i: Vec<f64>,
     fo_previous: f64,
     last_score: f64,
+    last_nccf: f64,
+    last_cpp: f64,
 }
 
 fn get_interpolated_spectrum(freq: f64, fs: f64, spec: &[f64], numbins: usize) -> f64 {
@@ -592,6 +596,65 @@ fn get_harmonic_score(fo: f64, fs: f64, pspec: &[f64], numbins: usize) -> f64 {
         score /= get_interpolated_spectrum(fo * (hf - 0.5), fs, pspec, numbins);
     }
     score
+}
+
+/// RAPT-style normalized cross-correlation of a frame with itself at a single
+/// lag (samples). Mean-removed, so DC/rumble does not inflate the score.
+/// Returns 0.0 (uninformative, not garbage) when the frame cannot fit one full
+/// period of overlap at the lag. O(frame).
+fn nccf_at_lag(x: &[f64], lag: usize) -> f64 {
+    let m = x.len().saturating_sub(lag);
+    if lag == 0 || m < lag {
+        return 0.0;
+    }
+    let mean = x.iter().sum::<f64>() / x.len() as f64;
+    let mut cross = 0.0;
+    let mut e0 = 0.0;
+    let mut el = 0.0;
+    for j in 0..m {
+        let a = x[j] - mean;
+        let b = x[j + lag] - mean;
+        cross += a * b;
+        e0 += a * a;
+        el += b * b;
+    }
+    cross / (e0 * el).sqrt().max(1e-12)
+}
+
+/// Cepstral peak prominence: peak of the log-power-spectrum cepstrum in the
+/// pitch quefrency range [fs/fo_ceil, fs/fo_floor], minus the mean cepstrum
+/// over that range (simple baseline, no regression). Scratch buffers `re`/`im`
+/// are fftsize long; `re[..numbins]` is overwritten with ln(pspec).
+fn cepstral_peak_prominence(
+    pspec: &[f64],
+    numbins: usize,
+    fs: f64,
+    fo_floor: f64,
+    fo_ceil: f64,
+    re: &mut [f64],
+    im: &mut [f64],
+    fft: &mut Fft,
+) -> f64 {
+    for k in 0..numbins {
+        re[k] = pspec[k].max(1e-15).ln();
+    }
+    mirror_upper(re, numbins);
+    im[..numbins].fill(0.0);
+    fft.inverse_real_f64(re, &im[..numbins]);
+
+    let q_lo = (fs / fo_ceil).ceil() as usize;
+    let q_hi = ((fs / fo_floor).floor() as usize).min(numbins - 1);
+    if q_lo >= q_hi {
+        return 0.0;
+    }
+    let mut max = f64::NEG_INFINITY;
+    let mut mean = 0.0;
+    for &c in &re[q_lo..=q_hi] {
+        max = max.max(c);
+        mean += c;
+    }
+    mean /= (q_hi - q_lo + 1) as f64;
+    max - mean
 }
 
 /// Estimate Fo from zero-crossings / peaks / dips of a band-limited waveform.
@@ -720,8 +783,12 @@ impl FoAnalyzer {
             spec_filt_i: vec![0.0; fftsize],
             filtered_r: vec![0.0; fftsize],
             filtered_i: vec![0.0; fftsize],
+            cep_r: vec![0.0; fftsize],
+            cep_i: vec![0.0; fftsize],
             fo_previous: 0.0,
             last_score: 0.0,
+            last_nccf: 0.0,
+            last_cpp: 0.0,
         }
     }
 
@@ -819,6 +886,21 @@ impl FoAnalyzer {
         }
 
         self.last_score = best_score;
+        self.last_cpp = cepstral_peak_prominence(
+            &self.pspec,
+            numbins,
+            fs,
+            fo_floor,
+            fo_ceil,
+            &mut self.cep_r,
+            &mut self.cep_i,
+            fft,
+        );
+        self.last_nccf = if best_fo >= fo_floor && best_fo <= fo_ceil {
+            nccf_at_lag(input, (fs / best_fo).round() as usize)
+        } else {
+            0.0
+        };
         if best_fo < fo_floor || best_fo > fo_ceil || best_score < 0.0 {
             return 0.0;
         }
@@ -2580,6 +2662,89 @@ mod tests {
 
     fn approx(a: f64, b: f64, eta: f64) -> bool {
         (a - b).abs() <= eta
+    }
+
+    #[test]
+    fn nccf_periodic_vs_noise() {
+        let fs = 44100.0_f64;
+        let fo = 220.0;
+        let lag = (fs / fo).round() as usize;
+        let n = 2048;
+
+        let sine: Vec<f64> = (0..n)
+            .map(|i| (2.0 * REIM_PI * fo * i as f64 / fs).sin())
+            .collect();
+        assert!(nccf_at_lag(&sine, lag) > 0.99);
+
+        // A DC offset must not inflate the score at a wrong lag.
+        let offset_sine: Vec<f64> = sine.iter().map(|s| s + 5.0).collect();
+        assert!(nccf_at_lag(&offset_sine, lag) > 0.99);
+        assert!(nccf_at_lag(&offset_sine, lag + lag / 2) < 0.5);
+
+        let mut rng = Xorshift::new();
+        let noise: Vec<f64> = (0..n).map(|_| rng.uniform() - 0.5).collect();
+        assert!(nccf_at_lag(&noise, lag).abs() < 0.2);
+
+        // Lag too large for one period of overlap: uninformative 0.0.
+        assert_eq!(nccf_at_lag(&sine, n / 2 + 1), 0.0);
+        assert_eq!(nccf_at_lag(&sine, 0), 0.0);
+    }
+
+    #[test]
+    fn cpp_periodic_vs_noise() {
+        let fs = 44100.0_f64;
+        let fftsize = 2048;
+        let numbins = fftsize / 2 + 1;
+        let mut fft = Fft::new(fftsize);
+        let mut re = vec![0.0; fftsize];
+        let mut im = vec![0.0; fftsize];
+
+        let pspec_of = |x: &Vec<f64>, fft: &mut Fft| {
+            let mut r: Vec<f64> = x
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| v * hanning_window(i as f64, fftsize as f64, fftsize as f64))
+                .collect();
+            let mut i = vec![0.0; fftsize];
+            fft.forward_real_f64(&mut r, &mut i);
+            (0..numbins)
+                .map(|k| complex_abs2(r[k], i[k]) + 1e-15)
+                .collect::<Vec<f64>>()
+        };
+
+        // Harmonic-rich source (CPP needs rahmonic ripple across many
+        // harmonics; a pure sine has none).
+        let fo = 200.0;
+        let voiced: Vec<f64> = (0..fftsize)
+            .map(|i| {
+                (1..=20)
+                    .map(|h| (2.0 * REIM_PI * fo * h as f64 * i as f64 / fs).sin() / h as f64)
+                    .sum()
+            })
+            .collect();
+        let mut rng = Xorshift::new();
+        let noise: Vec<f64> = (0..fftsize).map(|_| rng.uniform() - 0.5).collect();
+
+        let pspec_voiced = pspec_of(&voiced, &mut fft);
+        let pspec_noise = pspec_of(&noise, &mut fft);
+        let cpp_voiced = cepstral_peak_prominence(
+            &pspec_voiced, numbins, fs, 71.0, 800.0, &mut re, &mut im, &mut fft,
+        );
+        let cpp_noise = cepstral_peak_prominence(
+            &pspec_noise, numbins, fs, 71.0, 800.0, &mut re, &mut im, &mut fft,
+        );
+        assert!(
+            cpp_voiced > 2.0 * cpp_noise,
+            "cpp_voiced={cpp_voiced} cpp_noise={cpp_noise}"
+        );
+
+        // Near-silence must not NaN.
+        let tiny = vec![1e-20; fftsize];
+        let pspec_tiny = pspec_of(&tiny, &mut fft);
+        let cpp_tiny = cepstral_peak_prominence(
+            &pspec_tiny, numbins, fs, 71.0, 800.0, &mut re, &mut im, &mut fft,
+        );
+        assert!(cpp_tiny.is_finite());
     }
 
     #[test]
