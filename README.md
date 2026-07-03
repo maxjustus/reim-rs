@@ -258,10 +258,14 @@ fire on clean speech, so it leaves the C reference agreement above unchanged.
 ReIm also ships an **optional, experimental periodicity gate, off by default**.
 The Fo tracker returns a best candidate even on breath or noise, so a fo-in-range
 frame is not necessarily voiced. The gate thresholds a **fused voicing
-probability**: a logistic combination of the SRH harmonic score, the normalized
+probability**: a logistic combination of the SRH harmonic score's *margin over
+a running noise-floor estimate* (a slow-rising log-domain minimum tracker, so
+the score term adapts to each recording's noise conditions), the normalized
 autocorrelation at the pitch lag (NCCF), and the cepstral peak prominence (CPP),
-with weights fit offline (`eval/fit_fusion.py`) on Vocadito + PTDB-TUG speech
-under clean, white-noise, and mains-hum conditions. Enable it with
+with non-negative weights fit offline (`eval/fit_fusion.py`) on Vocadito +
+PTDB-TUG speech under clean, white-noise, and mains-hum conditions. (In the
+current fit CPP's weight lands at zero — NCCF plus the score margin carry its
+signal; CPP stays exposed in `VoicingFeatures` for refits.) Enable it with
 `Reim::set_voicing_score_min(x)` (x is a probability, ~0.6) or the
 `REIM_VOICING_SCORE_MIN` env var for the CLI. The gate has hysteresis: once
 voiced, frames stay voiced until the probability falls below 0.8·x, which keeps

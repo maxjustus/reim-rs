@@ -552,6 +552,8 @@ struct FoAnalyzer {
     last_score: f64,
     last_nccf: f64,
     last_cpp: f64,
+    score_floor: ScoreFloor,
+    last_score_margin: f64,
 }
 
 fn get_interpolated_spectrum(freq: f64, fs: f64, spec: &[f64], numbins: usize) -> f64 {
@@ -655,6 +657,43 @@ fn cepstral_peak_prominence(
     }
     mean /= (q_hi - q_lo + 1) as f64;
     max - mean
+}
+
+// Running noise-floor tracker for the SRH score, ln domain. Anchored at the
+// median false-alarm score measured on Vocadito (~40, see the VFA analysis);
+// drops instantly to new minima, rises at SCORE_FLOOR_RISE per frame (~0.2
+// ln/s at 5 ms frames, so a pause re-anchors within seconds), and is clamped
+// to PRIOR +/- SCORE_FLOOR_RANGE so a clip that starts mid-note (floor seeded
+// by a voiced score) can never eat the ~19-ln voiced/noise gap. Internal,
+// eval-chosen constants.
+const SCORE_FLOOR_PRIOR: f64 = 3.7; // ln(40)
+const SCORE_FLOOR_RISE: f64 = 0.001;
+const SCORE_FLOOR_RANGE: f64 = 6.0;
+
+struct ScoreFloor {
+    floor_ln: f64,
+}
+
+impl ScoreFloor {
+    fn new() -> Self {
+        ScoreFloor {
+            floor_ln: SCORE_FLOOR_PRIOR,
+        }
+    }
+
+    /// Advance the tracker with this frame's score and return ln(score) minus
+    /// the floor. Sentinel/absent scores (<= 0) leave the floor untouched and
+    /// return a large negative margin.
+    fn margin(&mut self, score: f64) -> f64 {
+        if score <= 0.0 {
+            return -SCORE_FLOOR_RANGE;
+        }
+        let lscore = score.ln();
+        self.floor_ln = lscore
+            .min(self.floor_ln + SCORE_FLOOR_RISE)
+            .clamp(SCORE_FLOOR_PRIOR - SCORE_FLOOR_RANGE, SCORE_FLOOR_PRIOR + SCORE_FLOOR_RANGE);
+        lscore - self.floor_ln
+    }
 }
 
 /// Estimate Fo from zero-crossings / peaks / dips of a band-limited waveform.
@@ -789,6 +828,8 @@ impl FoAnalyzer {
             last_score: 0.0,
             last_nccf: 0.0,
             last_cpp: 0.0,
+            score_floor: ScoreFloor::new(),
+            last_score_margin: 0.0,
         }
     }
 
@@ -886,6 +927,7 @@ impl FoAnalyzer {
         }
 
         self.last_score = best_score;
+        self.last_score_margin = self.score_floor.margin(best_score);
         self.last_cpp = cepstral_peak_prominence(
             &self.pspec,
             numbins,
@@ -933,20 +975,22 @@ struct ApAnalyzer {
 const VOICING_SCORE_HYSTERESIS: f64 = 0.8;
 
 // Logistic-regression fusion of the voicing features into a probability.
-// Weights fit offline (eval/fit_fusion.py) on raw features [ln(score), nccf,
-// cpp]; dataset and resulting metrics recorded in the commit that set them.
+// Weights fit offline (eval/fit_fusion.py) on raw features [score_margin,
+// nccf, cpp]; the margin (ln score minus the ScoreFloor running noise-floor
+// estimate) makes the score term adapt to the recording's noise conditions.
 // Calibrated for the default (fs, fftsize) config, like the other eval-chosen
 // constants. Internal, not part of the public API.
 // Fit over Vocadito (40 clips) + PTDB-TUG (295-clip stride-16 subsample), each
 // under clean/white20/white10/hum50 conditions (~1.8M frames): held-out F1
-// 0.874, AUC 0.953 pooled; 0.955 on clean Vocadito at threshold 0.5.
-const FUSION_BIAS: f64 = -3.077462961437281;
-const FUSION_WEIGHTS: [f64; 3] = [0.07029391640284875, 5.275854261068518, 1.2496788274186972];
+// 0.874, AUC 0.953 pooled. Non-negative fit; CPP's weight lands at 0.0 (its
+// signal is collinear with score_margin) but it stays a feature for refits.
+const FUSION_BIAS: f64 = -3.288530820025671;
+const FUSION_WEIGHTS: [f64; 3] = [0.11389676500181863, 4.940424642854478, 0.0];
 
 /// Fused voicing probability in (0,1): sigmoid of the weighted features.
 fn voicing_probability(f: VoicingFeatures) -> f64 {
     let z = FUSION_BIAS
-        + FUSION_WEIGHTS[0] * f.score.max(1e-12).ln()
+        + FUSION_WEIGHTS[0] * f.score_margin
         + FUSION_WEIGHTS[1] * f.nccf
         + FUSION_WEIGHTS[2] * f.cpp;
     1.0 / (1.0 + (-z).exp())
@@ -2094,20 +2138,24 @@ impl Synth {
 // Top-level real-time processor
 // ============================================================================
 
-/// Streaming analyzer: framer + Fo/Ap/Sp analyzers and their per-frame buffers.
-/// Push input samples; on each frame boundary the per-frame WORLD parameters
-/// become readable via the accessors. Allocation-free steady state.
 /// Raw per-frame features feeding the voicing decision: `score` is the SRH
 /// harmonic score (unbounded, orders of magnitude between noise and voice),
-/// `nccf` the normalized autocorrelation at the detected pitch lag (~1 =
-/// periodic), `cpp` the cepstral peak prominence (log-power units).
+/// `score_margin` is ln(score) minus a running per-recording noise-floor
+/// estimate (the fusion input; adapts to the recording's noise conditions,
+/// internal `ScoreFloor` tracker), `nccf` the normalized
+/// autocorrelation at the detected pitch lag (~1 = periodic), `cpp` the
+/// cepstral peak prominence (log-power units).
 #[derive(Clone, Copy, Debug)]
 pub struct VoicingFeatures {
     pub score: f64,
+    pub score_margin: f64,
     pub nccf: f64,
     pub cpp: f64,
 }
 
+/// Streaming analyzer: framer + Fo/Ap/Sp analyzers and their per-frame buffers.
+/// Push input samples; on each frame boundary the per-frame WORLD parameters
+/// become readable via the accessors. Allocation-free steady state.
 pub struct Analyzer {
     cfg: Config,
     fft: Fft,
@@ -2278,6 +2326,7 @@ impl Analyzer {
     pub fn voicing_features(&self) -> VoicingFeatures {
         VoicingFeatures {
             score: self.fo.last_score,
+            score_margin: self.fo.last_score_margin,
             nccf: self.fo.last_nccf,
             cpp: self.fo.last_cpp,
         }
@@ -2955,14 +3004,51 @@ mod tests {
     fn voicing_probability_monotone_in_each_feature() {
         let base = VoicingFeatures {
             score: 100.0,
+            score_margin: 1.0,
             nccf: 0.5,
             cpp: 0.5,
         };
         let p = voicing_probability(base);
         assert!(p > 0.0 && p < 1.0);
-        assert!(voicing_probability(VoicingFeatures { score: 1e4, ..base }) > p);
+        assert!(
+            voicing_probability(VoicingFeatures {
+                score_margin: 5.0,
+                ..base
+            }) > p
+        );
         assert!(voicing_probability(VoicingFeatures { nccf: 0.9, ..base }) > p);
-        assert!(voicing_probability(VoicingFeatures { cpp: 1.5, ..base }) > p);
+        // Non-decreasing, not strict: the fit may zero a redundant feature's
+        // weight (CPP's signal is carried by score_margin in the current fit).
+        assert!(voicing_probability(VoicingFeatures { cpp: 1.5, ..base }) >= p);
+    }
+
+    #[test]
+    fn score_floor_tracks_minimum_and_rises_slowly() {
+        let mut f = ScoreFloor::new();
+        // Noise-level scores pull the floor down to themselves: margin -> 0.
+        let quiet = (SCORE_FLOOR_PRIOR - 2.0).exp();
+        assert!(f.margin(quiet).abs() < 1e-9);
+        // A voiced score far above the floor gets its full margin (floor only
+        // rose by one RISE step).
+        let voiced = (SCORE_FLOOR_PRIOR + 18.0).exp();
+        let m = f.margin(voiced);
+        assert!((m - 20.0).abs() < 0.01, "margin {m}");
+        // Sustained voice can only raise the floor to the clamp, never eat the
+        // voiced/noise gap.
+        for _ in 0..1_000_000 {
+            f.margin(voiced);
+        }
+        assert!(f.margin(voiced) >= 12.0 - 1e-9);
+        // Sentinel scores leave the floor untouched.
+        let before = f.floor_ln;
+        assert_eq!(f.margin(-1.0), -SCORE_FLOOR_RANGE);
+        assert_eq!(f.floor_ln, before);
+        // A noisy recording (all scores depressed) re-anchors: margins recover.
+        let mut g = ScoreFloor::new();
+        let noisy_floor = (SCORE_FLOOR_PRIOR - 5.0).exp();
+        g.margin(noisy_floor);
+        let noisy_voiced = (SCORE_FLOOR_PRIOR + 3.0).exp();
+        assert!(g.margin(noisy_voiced) > 7.9);
     }
 
     #[test]
@@ -3237,6 +3323,7 @@ mod tests {
             f64::NAN,
             VoicingFeatures {
                 score: f64::INFINITY,
+                score_margin: SCORE_FLOOR_RANGE,
                 nccf: 1.0,
                 cpp: 1.0,
             },

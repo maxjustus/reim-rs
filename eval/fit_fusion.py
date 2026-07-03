@@ -60,7 +60,7 @@ def collect(reim_bin, datasets, conditions, limit, stride=1):
                 label = (ref_freq[idx] > 0)[ok]
                 x = np.column_stack(
                     [
-                        np.log(np.maximum(feat["score"][ok], 1e-12)),
+                        feat["score_margin"][ok],
                         feat["nccf"][ok],
                         feat["cpp"][ok],
                     ]
@@ -78,10 +78,14 @@ def fit_logistic(x, y, l2=1e-3, iters=500, lr=0.5):
     b = 0.0
     n = len(y)
     yf = y.astype(float)
+    # Projected gradient: weights clipped to >= 0 in the standardized domain
+    # so every feature stays monotone-increasing in the fused probability
+    # (voicing_probability's documented contract). Collinear features (margin
+    # vs CPP) otherwise pick up arbitrary-sign weight splits.
     for _ in range(iters):
         p = 1.0 / (1.0 + np.exp(-(xs @ w + b)))
         g = p - yf
-        w -= lr * (xs.T @ g / n + l2 * w)
+        w = np.maximum(w - lr * (xs.T @ g / n + l2 * w), 0.0)
         b -= lr * g.mean()
     # fold standardization into raw-feature weights
     w_raw = w / std
@@ -139,7 +143,7 @@ def main(argv=None):
         prec, rec, f1, auc = metrics(x[m], y[m], w, b)
         print(f"  {g}: P={prec:.3f} R={rec:.3f} F1={f1:.3f} AUC={auc:.3f}")
 
-    print("\n// paste into src/lib.rs (features: [ln(score), nccf, cpp], raw units)")
+    print("\n// paste into src/lib.rs (features: [score_margin, nccf, cpp], raw units)")
     print(f"const FUSION_BIAS: f64 = {float(b)!r};")
     print(
         "const FUSION_WEIGHTS: [f64; 3] = "

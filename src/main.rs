@@ -340,7 +340,8 @@ fn cmd_features(input: &str, fmin: Option<&str>, fmax: Option<&str>) -> Result<(
     apply_voicing_env(&mut reim);
     let half = fftsize as f64 / 2.0;
     let mut last = 0u64;
-    let mut out = String::from("frame,time,silence,fo,voiced,score,nccf,cpp,prob,strength\n");
+    let mut out =
+        String::from("frame,time,silence,fo,voiced,score,score_margin,nccf,cpp,prob,strength\n");
     for (i, &x) in wav.samples.iter().enumerate() {
         reim.process_sample(x);
         if reim.frame_count() != last {
@@ -348,12 +349,13 @@ fn cmd_features(input: &str, fmin: Option<&str>, fmax: Option<&str>) -> Result<(
             let t = ((i as f64 - half) / fs).max(0.0);
             let f = reim.last_voicing_features();
             out.push_str(&format!(
-                "{},{t:.6},{},{:.4},{},{:.6e},{:.6},{:.6},{:.6},{:.6}\n",
+                "{},{t:.6},{},{:.4},{},{:.6e},{:.6},{:.6},{:.6},{:.6},{:.6}\n",
                 last - 1,
                 reim.last_silence() as u8,
                 reim.last_fo(),
                 reim.last_voiced() as u8,
                 f.score,
+                f.score_margin,
                 f.nccf,
                 f.cpp,
                 reim.last_voicing_score(),
