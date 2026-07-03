@@ -1,4 +1,8 @@
+use std::f64::consts::PI;
 use std::ops::Range;
+
+use rustfft::num_complex::Complex;
+use rustfft::FftPlanner;
 
 use crate::Frame;
 
@@ -83,22 +87,235 @@ fn median_cents(vals: &[f64]) -> f64 {
     sorted[sorted.len() / 2]
 }
 
-fn make_note_contour(fo_hz: &[f64]) -> NoteContour {
-    let cents: Vec<f64> = fo_hz.iter().map(|&f| hz_to_cents(f)).collect();
-    let center = median_cents(&cents);
-    let drift: Vec<f64> = cents.iter().map(|&c| c - center).collect();
-    let len = fo_hz.len();
-    NoteContour {
-        center_cents: center,
-        drift,
-        vibrato_rate_hz: 0.0,
-        vibrato_amp: vec![0.0; len],
-        vibrato_phase: vec![0.0; len],
-        residual: vec![0.0; len],
+fn gaussian_lowpass(signal: &[f64], sigma: f64) -> Vec<f64> {
+    let radius = (3.0 * sigma).ceil() as usize;
+    if radius == 0 || signal.len() <= 1 {
+        return signal.to_vec();
+    }
+
+    // Build normalized Gaussian kernel
+    let kernel_len = 2 * radius + 1;
+    let mut kernel = vec![0.0; kernel_len];
+    let mut sum = 0.0;
+    for i in 0..kernel_len {
+        let x = i as f64 - radius as f64;
+        let val = (-0.5 * (x / sigma).powi(2)).exp();
+        kernel[i] = val;
+        sum += val;
+    }
+    for k in &mut kernel {
+        *k /= sum;
+    }
+
+    // Reflect-pad the signal
+    let n = signal.len();
+    let mut padded = vec![0.0; n + 2 * radius];
+    for i in 0..radius {
+        // Reflect: index radius-1-i maps to signal[radius-i] clamped
+        padded[i] = signal[(radius - i).min(n - 1)];
+    }
+    padded[radius..radius + n].copy_from_slice(signal);
+    for i in 0..radius {
+        padded[radius + n + i] = signal[n.saturating_sub(2 + i)];
+    }
+
+    // Convolve
+    let mut out = vec![0.0; n];
+    for i in 0..n {
+        let mut acc = 0.0;
+        for j in 0..kernel_len {
+            acc += padded[i + j] * kernel[j];
+        }
+        out[i] = acc;
+    }
+    out
+}
+
+fn autocorrelation(signal: &[f64]) -> Vec<f64> {
+    let n = signal.len();
+    let mut result = vec![0.0; n];
+    for lag in 0..n {
+        let mut sum = 0.0;
+        for i in 0..n - lag {
+            sum += signal[i] * signal[i + lag];
+        }
+        result[lag] = sum;
+    }
+    result
+}
+
+fn bandpass_fft(signal: &[f64], center_hz: f64, half_width_hz: f64, sample_rate: f64) -> Vec<f64> {
+    let n = signal.len();
+    let mut planner = FftPlanner::<f64>::new();
+    let fft = planner.plan_fft_forward(n);
+    let ifft = planner.plan_fft_inverse(n);
+
+    let mut buf: Vec<Complex<f64>> = signal.iter().map(|&x| Complex::new(x, 0.0)).collect();
+    fft.process(&mut buf);
+
+    let lo = center_hz - half_width_hz;
+    let hi = center_hz + half_width_hz;
+
+    for (i, c) in buf.iter_mut().enumerate() {
+        let freq = if i <= n / 2 {
+            i as f64 * sample_rate / n as f64
+        } else {
+            (n - i) as f64 * sample_rate / n as f64
+        };
+        if freq < lo || freq > hi {
+            *c = Complex::new(0.0, 0.0);
+        }
+    }
+
+    ifft.process(&mut buf);
+    buf.iter().map(|c| c.re / n as f64).collect()
+}
+
+fn hilbert_analytic(signal: &[f64]) -> Vec<Complex<f64>> {
+    let n = signal.len();
+    let mut planner = FftPlanner::<f64>::new();
+    let fft = planner.plan_fft_forward(n);
+    let ifft = planner.plan_fft_inverse(n);
+
+    let mut buf: Vec<Complex<f64>> = signal.iter().map(|&x| Complex::new(x, 0.0)).collect();
+    fft.process(&mut buf);
+
+    // Zero negative frequencies, double positive, keep DC and Nyquist
+    // DC (index 0): unchanged
+    // Positive frequencies: indices 1..n/2 -> multiply by 2
+    // Nyquist (index n/2 if n is even): unchanged
+    // Negative frequencies: indices n/2+1..n -> zero
+    for i in 1..n {
+        if i < n.div_ceil(2) {
+            buf[i] *= 2.0;
+        } else if i > n / 2 {
+            buf[i] = Complex::new(0.0, 0.0);
+        }
+        // i == n/2 (Nyquist for even n): unchanged
+    }
+
+    ifft.process(&mut buf);
+    for c in &mut buf {
+        *c /= n as f64;
+    }
+    buf
+}
+
+fn unwrap_phase(phase: &mut [f64]) {
+    for i in 1..phase.len() {
+        let mut diff = phase[i] - phase[i - 1];
+        while diff > PI {
+            diff -= 2.0 * PI;
+        }
+        while diff < -PI {
+            diff += 2.0 * PI;
+        }
+        phase[i] = phase[i - 1] + diff;
     }
 }
 
-pub fn segment(frames: &[Frame], config: &SegmentConfig) -> Vec<Segment> {
+pub fn decompose_contour(fo_hz: &[f64], frame_rate_hz: f64, config: &SegmentConfig) -> NoteContour {
+    let n = fo_hz.len();
+    let cents: Vec<f64> = fo_hz.iter().map(|&f| hz_to_cents(f)).collect();
+
+    // Center: median
+    let center = median_cents(&cents);
+
+    // Drift: Gaussian lowpass of (cents - center)
+    let deviation: Vec<f64> = cents.iter().map(|&c| c - center).collect();
+    let sigma = frame_rate_hz / (2.0 * PI * config.drift_cutoff_hz);
+    let drift = gaussian_lowpass(&deviation, sigma);
+
+    // Detrended signal
+    let detrended: Vec<f64> = (0..n).map(|i| deviation[i] - drift[i]).collect();
+
+    // Vibrato extraction
+    let min_frames = (2.0 * frame_rate_hz / config.vibrato_min_hz).ceil() as usize;
+    if n < min_frames {
+        let residual = detrended;
+        return NoteContour {
+            center_cents: center,
+            drift,
+            vibrato_rate_hz: 0.0,
+            vibrato_amp: vec![0.0; n],
+            vibrato_phase: vec![0.0; n],
+            residual,
+        };
+    }
+
+    // Autocorrelation to find vibrato rate
+    let acorr = autocorrelation(&detrended);
+    let lag_min = (frame_rate_hz / config.vibrato_max_hz).floor() as usize;
+    let lag_max = (frame_rate_hz / config.vibrato_min_hz).ceil() as usize;
+    let lag_max = lag_max.min(n - 1);
+
+    if acorr[0] < 1e-10 {
+        return NoteContour {
+            center_cents: center,
+            drift,
+            vibrato_rate_hz: 0.0,
+            vibrato_amp: vec![0.0; n],
+            vibrato_phase: vec![0.0; n],
+            residual: detrended,
+        };
+    }
+
+    let threshold = 0.3 * acorr[0];
+    let mut best_lag = 0;
+    let mut best_val = f64::NEG_INFINITY;
+
+    if lag_min <= lag_max {
+        for lag in lag_min..=lag_max {
+            if acorr[lag] > best_val {
+                best_val = acorr[lag];
+                best_lag = lag;
+            }
+        }
+    }
+
+    if best_val <= threshold || best_lag == 0 {
+        // No vibrato detected
+        return NoteContour {
+            center_cents: center,
+            drift,
+            vibrato_rate_hz: 0.0,
+            vibrato_amp: vec![0.0; n],
+            vibrato_phase: vec![0.0; n],
+            residual: detrended,
+        };
+    }
+
+    let vibrato_rate = frame_rate_hz / best_lag as f64;
+
+    // Bandpass around detected rate ±1Hz, then Hilbert
+    let bandpassed = bandpass_fft(&detrended, vibrato_rate, 1.0, frame_rate_hz);
+    let analytic = hilbert_analytic(&bandpassed);
+
+    let vibrato_amp: Vec<f64> = analytic.iter().map(|c| c.norm()).collect();
+    // Shift phase by pi/2 so that amp * sin(phase) = real part of analytic signal
+    // (the real part is amp * cos(atan2(im,re)), and sin(x + pi/2) = cos(x))
+    let mut vibrato_phase: Vec<f64> = analytic
+        .iter()
+        .map(|c| c.im.atan2(c.re) + PI / 2.0)
+        .collect();
+    unwrap_phase(&mut vibrato_phase);
+
+    // Residual: original deviation - drift - vibrato reconstruction
+    let residual: Vec<f64> = (0..n)
+        .map(|i| deviation[i] - drift[i] - vibrato_amp[i] * vibrato_phase[i].sin())
+        .collect();
+
+    NoteContour {
+        center_cents: center,
+        drift,
+        vibrato_rate_hz: vibrato_rate,
+        vibrato_amp,
+        vibrato_phase,
+        residual,
+    }
+}
+
+pub fn segment(frames: &[Frame], frame_rate_hz: f64, config: &SegmentConfig) -> Vec<Segment> {
     if frames.is_empty() {
         return Vec::new();
     }
@@ -234,10 +451,10 @@ pub fn segment(frames: &[Frame], config: &SegmentConfig) -> Vec<Segment> {
                     kind: SegmentKind::Unvoiced,
                 });
             } else {
-                let fo_slice: Vec<f64> = (range.start..range.end).map(|j| cleaned[j]).collect();
+                let fo_slice: Vec<f64> = (range.start..range.end).map(|j| frames[j].fo).collect();
                 segments.push(Segment {
                     frames: range,
-                    kind: SegmentKind::Note(make_note_contour(&fo_slice)),
+                    kind: SegmentKind::Note(decompose_contour(&fo_slice, frame_rate_hz, config)),
                 });
             }
         }
