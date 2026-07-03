@@ -2417,6 +2417,10 @@ pub fn write_wav_f32(path: &str, samples: &[f64], sample_rate: u32) -> Result<()
     std::fs::write(path, out).map_err(|e| format!("write {path}: {e}"))
 }
 
+pub fn write_wav(path: &str, data: &WavData) -> Result<(), String> {
+    write_wav_f32(path, &data.samples, data.sample_rate)
+}
+
 // ============================================================================
 // Profiling
 // ============================================================================

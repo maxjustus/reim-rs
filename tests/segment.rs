@@ -2,7 +2,7 @@ use reim::segment::{
     clean_contour, contour_svg, decompose_contour, render, segment, NoteEdit, SegmentConfig,
     SegmentKind,
 };
-use reim::{Analyzer, Frame, Reim, Synthesizer};
+use reim::{write_wav, Analyzer, Frame, Reim, Synthesizer, WavData};
 
 const FS: f64 = 24_000.0;
 const N: usize = 12_000; // 0.5 s
@@ -881,4 +881,257 @@ fn e2e_achieved_vs_intended_identity() {
         "identity median error too high: {median} cents"
     );
     assert!(p95 < 600.0, "identity p95 error too high: {p95} cents");
+}
+
+// --- listening tests (write output files for manual inspection) ---
+
+fn ensure_output_dir() {
+    std::fs::create_dir_all("tests/output").ok();
+}
+
+#[test]
+#[ignore]
+fn write_identity_roundtrip() {
+    ensure_output_dir();
+    let input = synthetic_input();
+    let mut analyzer = Analyzer::with_defaults(FS);
+    let frames = analyzer.analyze_to_frames(&input);
+    let mut synth = Synthesizer::with_defaults(FS);
+    let output = synth.synthesize_frames(&frames);
+
+    let wav = WavData {
+        sample_rate: FS as u32,
+        samples: output,
+    };
+    write_wav("tests/output/identity.wav", &wav).unwrap();
+    eprintln!("wrote tests/output/identity.wav");
+}
+
+#[test]
+#[ignore]
+fn write_pitch_correction() {
+    ensure_output_dir();
+    let input = synthetic_input();
+    let mut analyzer = Analyzer::with_defaults(FS);
+    let frames = analyzer.analyze_to_frames(&input);
+    let numbins = frames
+        .first()
+        .map(|f| f.spectral_envelope.len())
+        .unwrap_or(0);
+    let config = SegmentConfig::default();
+    let segs = segment(&frames, FRAME_RATE, &config);
+
+    let edits: Vec<NoteEdit> = segs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            if let SegmentKind::Note(c) = &s.kind {
+                let nearest_semitone = (c.center_cents / 100.0).round() * 100.0;
+                Some(NoteEdit {
+                    segment_index: i,
+                    target_cents: Some(nearest_semitone),
+                    drift_scale: 0.0,
+                    vibrato_scale: 1.0,
+                    vibrato_rate_scale: 1.0,
+                    out_len: None,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let rendered = render(&frames, &segs, &edits, numbins);
+    let mut synth = Synthesizer::with_defaults(FS);
+    let output = synth.synthesize_frames(&rendered);
+
+    let wav = WavData {
+        sample_rate: FS as u32,
+        samples: output.clone(),
+    };
+    write_wav("tests/output/pitch_corrected.wav", &wav).unwrap();
+
+    let intended_fo: Vec<f64> = rendered.iter().map(|f| f.fo).collect();
+    let mut re_analyzer = Analyzer::with_defaults(FS);
+    let re_frames = re_analyzer.analyze_to_frames(&output);
+    let re_segs = segment(&re_frames, FRAME_RATE, &config);
+    let svg = contour_svg(&re_frames, &re_segs, FRAME_RATE, Some(&intended_fo));
+    std::fs::write("tests/output/pitch_corrected.svg", &svg).unwrap();
+
+    eprintln!("wrote tests/output/pitch_corrected.wav and .svg");
+}
+
+#[test]
+#[ignore]
+fn write_vibrato_removal() {
+    ensure_output_dir();
+    let input = synthetic_input();
+    let mut analyzer = Analyzer::with_defaults(FS);
+    let frames = analyzer.analyze_to_frames(&input);
+    let numbins = frames
+        .first()
+        .map(|f| f.spectral_envelope.len())
+        .unwrap_or(0);
+    let config = SegmentConfig::default();
+    let segs = segment(&frames, FRAME_RATE, &config);
+
+    let edits: Vec<NoteEdit> = segs
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| matches!(s.kind, SegmentKind::Note(_)))
+        .map(|(i, _)| NoteEdit {
+            segment_index: i,
+            target_cents: None,
+            drift_scale: 1.0,
+            vibrato_scale: 0.0,
+            vibrato_rate_scale: 1.0,
+            out_len: None,
+        })
+        .collect();
+
+    let rendered = render(&frames, &segs, &edits, numbins);
+    let mut synth = Synthesizer::with_defaults(FS);
+    let output = synth.synthesize_frames(&rendered);
+
+    let wav = WavData {
+        sample_rate: FS as u32,
+        samples: output.clone(),
+    };
+    write_wav("tests/output/no_vibrato.wav", &wav).unwrap();
+
+    let intended_fo: Vec<f64> = rendered.iter().map(|f| f.fo).collect();
+    let mut re_analyzer = Analyzer::with_defaults(FS);
+    let re_frames = re_analyzer.analyze_to_frames(&output);
+    let re_segs = segment(&re_frames, FRAME_RATE, &config);
+    let svg = contour_svg(&re_frames, &re_segs, FRAME_RATE, Some(&intended_fo));
+    std::fs::write("tests/output/no_vibrato.svg", &svg).unwrap();
+
+    eprintln!("wrote tests/output/no_vibrato.wav and .svg");
+}
+
+#[test]
+#[ignore]
+fn write_transpose() {
+    ensure_output_dir();
+    let input = synthetic_input();
+    let mut analyzer = Analyzer::with_defaults(FS);
+    let frames = analyzer.analyze_to_frames(&input);
+    let numbins = frames
+        .first()
+        .map(|f| f.spectral_envelope.len())
+        .unwrap_or(0);
+    let config = SegmentConfig::default();
+    let segs = segment(&frames, FRAME_RATE, &config);
+
+    let edits: Vec<NoteEdit> = segs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            if let SegmentKind::Note(c) = &s.kind {
+                Some(NoteEdit {
+                    segment_index: i,
+                    target_cents: Some(c.center_cents + 300.0),
+                    drift_scale: 1.0,
+                    vibrato_scale: 1.0,
+                    vibrato_rate_scale: 1.0,
+                    out_len: None,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let rendered = render(&frames, &segs, &edits, numbins);
+    let mut synth = Synthesizer::with_defaults(FS);
+    let output = synth.synthesize_frames(&rendered);
+
+    let wav = WavData {
+        sample_rate: FS as u32,
+        samples: output,
+    };
+    write_wav("tests/output/transposed.wav", &wav).unwrap();
+    eprintln!("wrote tests/output/transposed.wav");
+}
+
+#[test]
+#[ignore]
+fn write_time_stretch() {
+    ensure_output_dir();
+    let input = synthetic_input();
+    let mut analyzer = Analyzer::with_defaults(FS);
+    let frames = analyzer.analyze_to_frames(&input);
+    let numbins = frames
+        .first()
+        .map(|f| f.spectral_envelope.len())
+        .unwrap_or(0);
+    let config = SegmentConfig::default();
+    let segs = segment(&frames, FRAME_RATE, &config);
+
+    let edits: Vec<NoteEdit> = segs
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| matches!(s.kind, SegmentKind::Note(_)))
+        .map(|(i, s)| NoteEdit {
+            segment_index: i,
+            target_cents: None,
+            drift_scale: 1.0,
+            vibrato_scale: 1.0,
+            vibrato_rate_scale: 1.0,
+            out_len: Some((s.frames.len() as f64 * 1.5) as usize),
+        })
+        .collect();
+
+    let rendered = render(&frames, &segs, &edits, numbins);
+    let mut synth = Synthesizer::with_defaults(FS);
+    let output = synth.synthesize_frames(&rendered);
+
+    let wav = WavData {
+        sample_rate: FS as u32,
+        samples: output,
+    };
+    write_wav("tests/output/stretched.wav", &wav).unwrap();
+    eprintln!("wrote tests/output/stretched.wav");
+}
+
+#[test]
+#[ignore]
+fn write_contour_csv() {
+    ensure_output_dir();
+    let input = synthetic_input();
+    let mut analyzer = Analyzer::with_defaults(FS);
+    let frames = analyzer.analyze_to_frames(&input);
+    let config = SegmentConfig::default();
+    let segs = segment(&frames, FRAME_RATE, &config);
+
+    for (seg_idx, seg) in segs.iter().enumerate() {
+        if let SegmentKind::Note(c) = &seg.kind {
+            let mut csv = String::from("frame,original_cents,center,drift,vibrato,residual\n");
+            for (j, frame_idx) in seg.frames.clone().enumerate() {
+                let orig_cents = if frames[frame_idx].voiced && frames[frame_idx].fo > 0.0 {
+                    1200.0 * (frames[frame_idx].fo / 440.0).log2()
+                } else {
+                    0.0
+                };
+                let vib = if j < c.vibrato_amp.len() && j < c.vibrato_phase.len() {
+                    c.vibrato_amp[j] * c.vibrato_phase[j].sin()
+                } else {
+                    0.0
+                };
+                let drift = if j < c.drift.len() { c.drift[j] } else { 0.0 };
+                let residual = if j < c.residual.len() {
+                    c.residual[j]
+                } else {
+                    0.0
+                };
+                csv.push_str(&format!(
+                    "{frame_idx},{orig_cents:.2},{:.2},{drift:.2},{vib:.2},{residual:.2}\n",
+                    c.center_cents
+                ));
+            }
+            let path = format!("tests/output/contour_{seg_idx}.csv");
+            std::fs::write(&path, &csv).unwrap();
+            eprintln!("wrote {path}");
+        }
+    }
 }
