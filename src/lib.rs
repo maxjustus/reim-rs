@@ -1947,7 +1947,7 @@ impl Synth {
         cfg: &Config,
         fft: &mut Fft,
         fo: f64,
-        isvoiced: bool,
+        strength: f64,
         issilence: bool,
         ap: &[f64],
         sp: &[f64],
@@ -1956,14 +1956,23 @@ impl Synth {
         let fftsize = cfg.fftsize;
         let numbins = cfg.numbins;
 
+        // Per-bin energy split: pulse gets strength*(1-aper), noise gets the
+        // rest, so pulse + noise == spec for any strength. At strength 1.0 the
+        // arithmetic is bit-identical to the hard voiced split (spec*(1-aper) /
+        // spec*aper); at 0.0 it equals the unvoiced path.
         for k in 0..numbins {
             let spec = sp[k];
             let aper = ap[k] * ap[k];
-            self.spec_pulse_r[k] = spec * (1.0 - aper);
-            self.spec_noise_r[k] = spec * aper;
+            let periodic = strength * (1.0 - aper);
+            self.spec_pulse_r[k] = spec * periodic;
+            self.spec_noise_r[k] = spec * (aper + (1.0 - strength) * (1.0 - aper));
         }
 
-        self.has_pulse = isvoiced && !issilence;
+        // The fo range guard matters for fractional strength: a borderline
+        // frame can carry strength > 0 with fo = 0.0, and `interval = fs/fo`
+        // must never see that.
+        self.has_pulse =
+            strength > 0.0 && !issilence && fo >= cfg.fo_floor && fo <= cfg.fo_ceil;
         if self.has_pulse {
             self.interval = fs / fo;
             let gain_pulse = self.interval.sqrt();
@@ -2274,11 +2283,34 @@ impl Synthesizer {
         aperiodicity: &[f64],
         spectral_envelope: &[f64],
     ) {
+        self.push_frame_with_strength(
+            fo,
+            if voiced { 1.0 } else { 0.0 },
+            silence,
+            aperiodicity,
+            spectral_envelope,
+        );
+    }
+
+    /// Like [`push_frame`](Self::push_frame) but with a continuous voicing
+    /// strength in [0,1]: pulse energy scales with strength per bin and noise
+    /// gains exactly what pulse loses, so per-bin energy is conserved.
+    /// `strength = 1.0` is bit-identical to `push_frame(voiced = true)`;
+    /// `0.0` renders fully aperiodic. Fractional strengths are an opt-in
+    /// departure from the C reference (see `Reim::set_soft_voicing`).
+    pub fn push_frame_with_strength(
+        &mut self,
+        fo: f64,
+        strength: f64,
+        silence: bool,
+        aperiodicity: &[f64],
+        spectral_envelope: &[f64],
+    ) {
         self.syn.new_frame(
             &self.cfg,
             &mut self.fft,
             fo,
-            voiced,
+            strength,
             silence,
             aperiodicity,
             spectral_envelope,
@@ -2771,6 +2803,58 @@ mod tests {
             &pspec_tiny, numbins, fs, 71.0, 800.0, &mut re, &mut im, &mut fft,
         );
         assert!(cpp_tiny.is_finite());
+    }
+
+    #[test]
+    fn push_frame_with_strength_matches_bool_paths() {
+        let fs = 24000.0;
+        let numbins = default_fftsize(fs, 71.0) / 2 + 1;
+        // A mid-range aperiodicity so the pulse/noise split is non-trivial.
+        let ap = vec![0.5; numbins];
+        let sp: Vec<f64> = (0..numbins).map(|k| 1.0 / (1.0 + k as f64)).collect();
+
+        let render = |voiced: Option<bool>, strength: f64| {
+            let mut synth = Synthesizer::with_defaults(fs);
+            match voiced {
+                Some(v) => synth.push_frame(220.0, v, false, &ap, &sp),
+                None => synth.push_frame_with_strength(220.0, strength, false, &ap, &sp),
+            }
+            (0..2048).map(|_| synth.next_sample()).collect::<Vec<f64>>()
+        };
+
+        // strength 1.0 == voiced, bit-identical.
+        assert_eq!(render(Some(true), 0.0), render(None, 1.0));
+        // strength 0.0 == unvoiced when ap = 1.0 (the analyzer's unvoiced case).
+        let ap_unvoiced = vec![1.0; numbins];
+        let mut a = Synthesizer::with_defaults(fs);
+        a.push_frame(220.0, false, false, &ap_unvoiced, &sp);
+        let mut b = Synthesizer::with_defaults(fs);
+        b.push_frame_with_strength(220.0, 0.0, false, &ap_unvoiced, &sp);
+        for _ in 0..2048 {
+            assert_eq!(a.next_sample(), b.next_sample());
+        }
+    }
+
+    #[test]
+    fn strength_split_conserves_per_bin_energy() {
+        let fs = 24000.0;
+        let mut synth = Synthesizer::with_defaults(fs);
+        let numbins = synth.cfg.numbins;
+        let ap: Vec<f64> = (0..numbins).map(|k| (k as f64 / numbins as f64)).collect();
+        let sp: Vec<f64> = (0..numbins).map(|k| 1.0 / (1.0 + k as f64)).collect();
+        for &strength in &[0.0, 0.25, 0.5, 0.9, 1.0] {
+            // Silence path skips the min-phase transform, leaving the raw
+            // pulse/noise split observable in the spectra buffers.
+            synth.push_frame_with_strength(220.0, strength, true, &ap, &sp);
+            for k in 0..numbins {
+                let total = synth.syn.spec_pulse_r[k] + synth.syn.spec_noise_r[k];
+                assert!(
+                    approx(total, sp[k], 1e-12 * (1.0 + sp[k])),
+                    "strength={strength} bin={k}: {total} != {}",
+                    sp[k]
+                );
+            }
+        }
     }
 
     #[test]
