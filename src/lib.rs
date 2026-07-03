@@ -836,6 +836,34 @@ struct ApAnalyzer {
     x_imag: Vec<f64>,
     d4c: D4c,
     score_min: f64, // periodicity-gate threshold; 0.0 = gate off (default)
+    score_gate: SchmittGate,
+}
+
+// Hysteresis ratio for the opt-in score gate: once voiced, a frame stays voiced
+// until its score drops below this fraction of `score_min`. Recovers soft note
+// tails whose SRH score decays smoothly through the threshold. Eval-chosen on
+// Vocadito at score_min=1000 (sweep 1.0/0.3/0.1/0.03): 0.1 lifts voicing recall
+// 0.946->0.960 and RPA 0.933->0.944 with F1 flat (0.926->0.925). Internal, not
+// part of the public API.
+const VOICING_SCORE_HYSTERESIS: f64 = 0.1;
+
+/// Schmitt trigger for the score gate: enter voiced at `score >= high`, stay
+/// until `score < high * VOICING_SCORE_HYSTERESIS`. The caller latches `open`
+/// from the *final* voiced decision, so silence or any hard gate closing the
+/// frame also closes the trigger.
+struct SchmittGate {
+    open: bool,
+}
+
+impl SchmittGate {
+    fn pass(&self, score: f64, high: f64) -> bool {
+        let threshold = if self.open {
+            high * VOICING_SCORE_HYSTERESIS
+        } else {
+            high
+        };
+        score >= threshold
+    }
 }
 
 // Reject a frame as unvoiced when its energy is concentrated BELOW the detected
@@ -1445,6 +1473,7 @@ impl ApAnalyzer {
             x_imag: vec![0.0; cfg.fftsize],
             d4c: D4c::new(cfg),
             score_min: 0.0,
+            score_gate: SchmittGate { open: false },
         }
     }
 
@@ -1469,9 +1498,10 @@ impl ApAnalyzer {
         // or fo is out of range. The negated range test (rather than `>=`/`<=`) makes
         // a NaN fo fall through to the V/UV decision, matching C's `<`/`>` semantics.
         let out_of_range = fo < cfg.fo_floor || fo > cfg.fo_ceil;
+        let score_pass = self.score_min <= 0.0 || self.score_gate.pass(score, self.score_min);
         let voiced = !issilence
             && !out_of_range
-            && score >= self.score_min
+            && score_pass
             && !low_band_dominated(
                 input,
                 &mut self.x_real,
@@ -1490,6 +1520,7 @@ impl ApAnalyzer {
                 cfg.fs,
                 fft,
             );
+        self.score_gate.open = voiced;
         if voiced {
             self.d4c
                 .analyze(input, fo, cfg.fftsize / 2, &mut ap[..numbins]);
@@ -2104,8 +2135,11 @@ impl Analyzer {
     /// gate: the Fo tracker returns a candidate even on breath/noise, and true
     /// voiced frames score orders of magnitude higher, so a threshold (~1e3 on
     /// Vocadito) cuts voicing false alarms sharply. Tradeoff: it also rejects
-    /// some soft/decaying true-voiced frames. See `plans/merge-d4c-and-vfa.md`
-    /// and the README "Voicing" section.
+    /// some soft/decaying true-voiced frames. The gate has hysteresis: once a
+    /// frame is voiced, following frames stay voiced until the score falls
+    /// below a fraction of `min` ([`VOICING_SCORE_HYSTERESIS`], internal),
+    /// which keeps soft note tails from being clipped. See
+    /// `plans/merge-d4c-and-vfa.md` and the README "Voicing" section.
     pub fn set_voicing_score_min(&mut self, min: f64) {
         self.ap.score_min = min;
     }
@@ -2546,6 +2580,30 @@ mod tests {
 
     fn approx(a: f64, b: f64, eta: f64) -> bool {
         (a - b).abs() <= eta
+    }
+
+    #[test]
+    fn schmitt_gate_hysteresis() {
+        let high = 1000.0;
+        let low = high * VOICING_SCORE_HYSTERESIS;
+        let mut gate = SchmittGate { open: false };
+
+        // Closed: only scores >= high pass.
+        assert!(!gate.pass(high - 1.0, high));
+        assert!(!gate.pass(low, high));
+        assert!(gate.pass(high, high));
+
+        // Open: scores in [low, high) keep passing.
+        gate.open = true;
+        assert!(gate.pass(high - 1.0, high));
+        assert!(gate.pass(low, high));
+        // Below low: closes.
+        assert!(!gate.pass(low - 1e-9, high));
+
+        // A veto (silence / hard gate) closes the latch regardless of score;
+        // the caller sets open from the final voiced decision.
+        gate.open = false;
+        assert!(!gate.pass(high - 1.0, high));
     }
 
     #[test]
