@@ -609,3 +609,276 @@ fn correlation(a: &[f64], b: &[f64]) -> f64 {
     }
     sum_ab / (sum_a2.sqrt() * sum_b2.sqrt() + 1e-20)
 }
+
+// --- end-to-end integration tests ---
+
+#[test]
+fn e2e_segment_boundaries() {
+    let input = synthetic_input();
+    let mut analyzer = Analyzer::with_defaults(FS);
+    let frames = analyzer.analyze_to_frames(&input);
+    let config = SegmentConfig::default();
+    let segs = segment(&frames, FRAME_RATE, &config);
+
+    let has_note = segs.iter().any(|s| matches!(s.kind, SegmentKind::Note(_)));
+    let has_unvoiced = segs.iter().any(|s| matches!(s.kind, SegmentKind::Unvoiced));
+    assert!(has_note, "should detect at least one note");
+    assert!(has_unvoiced, "should detect silence as unvoiced");
+
+    assert!(
+        matches!(segs.last().unwrap().kind, SegmentKind::Unvoiced),
+        "last segment should be unvoiced (silence)"
+    );
+}
+
+#[test]
+fn e2e_identity_through_segment_render() {
+    let input = synthetic_input();
+
+    let mut reim = Reim::with_defaults(FS);
+    let mut reference = vec![0.0; input.len()];
+    reim.process_block(&input, &mut reference);
+
+    let mut analyzer = Analyzer::with_defaults(FS);
+    let frames = analyzer.analyze_to_frames(&input);
+    let numbins = frames
+        .first()
+        .map(|f| f.spectral_envelope.len())
+        .unwrap_or(0);
+    let config = SegmentConfig::default();
+    let segs = segment(&frames, FRAME_RATE, &config);
+
+    let edits: Vec<NoteEdit> = segs
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| matches!(s.kind, SegmentKind::Note(_)))
+        .map(|(i, _)| NoteEdit::identity(i))
+        .collect();
+
+    let rendered = render(&frames, &segs, &edits, numbins);
+    assert_eq!(
+        rendered.len(),
+        frames.len(),
+        "identity render should preserve frame count"
+    );
+
+    let mut synth = Synthesizer::with_defaults(FS);
+    let test_output = synth.synthesize_frames(&rendered);
+
+    let n = reference.len().min(test_output.len());
+    let snr = snr_db(&reference[..n], &test_output[..n]);
+    assert!(
+        snr > 80.0,
+        "full pipeline identity SNR too low: {snr:.1} dB (need >80 dB)"
+    );
+}
+
+#[test]
+fn e2e_pitch_correction() {
+    let input = synthetic_input();
+    let mut analyzer = Analyzer::with_defaults(FS);
+    let frames = analyzer.analyze_to_frames(&input);
+    let numbins = frames
+        .first()
+        .map(|f| f.spectral_envelope.len())
+        .unwrap_or(0);
+    let config = SegmentConfig::default();
+    let segs = segment(&frames, FRAME_RATE, &config);
+
+    let target = -1200.0;
+    let edits: Vec<NoteEdit> = segs
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| matches!(s.kind, SegmentKind::Note(_)))
+        .map(|(i, _)| NoteEdit {
+            segment_index: i,
+            target_cents: Some(target),
+            drift_scale: 0.0,
+            vibrato_scale: 1.0,
+            vibrato_rate_scale: 1.0,
+            out_len: None,
+        })
+        .collect();
+
+    let rendered = render(&frames, &segs, &edits, numbins);
+
+    let voiced_cents: Vec<f64> = rendered
+        .iter()
+        .filter(|f| f.voiced)
+        .map(|f| 1200.0 * (f.fo / 440.0).log2())
+        .collect();
+
+    if !voiced_cents.is_empty() {
+        let mean = voiced_cents.iter().sum::<f64>() / voiced_cents.len() as f64;
+        assert!(
+            (mean - target).abs() < 50.0,
+            "mean pitch should be near A3 ({target} cents), got {mean} cents"
+        );
+    }
+}
+
+#[test]
+fn e2e_vibrato_removal() {
+    let input = synthetic_input();
+    let mut analyzer = Analyzer::with_defaults(FS);
+    let frames = analyzer.analyze_to_frames(&input);
+    let numbins = frames
+        .first()
+        .map(|f| f.spectral_envelope.len())
+        .unwrap_or(0);
+    let config = SegmentConfig::default();
+    let segs = segment(&frames, FRAME_RATE, &config);
+
+    let edits: Vec<NoteEdit> = segs
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| matches!(s.kind, SegmentKind::Note(_)))
+        .map(|(i, _)| NoteEdit {
+            segment_index: i,
+            target_cents: None,
+            drift_scale: 1.0,
+            vibrato_scale: 0.0,
+            vibrato_rate_scale: 1.0,
+            out_len: None,
+        })
+        .collect();
+
+    let rendered = render(&frames, &segs, &edits, numbins);
+
+    // Compare per-note variance (global variance is dominated by pitch
+    // differences between notes, not vibrato within a note).
+    for seg in &segs {
+        if !matches!(seg.kind, SegmentKind::Note(_)) {
+            continue;
+        }
+        let original_cents: Vec<f64> = frames[seg.frames.clone()]
+            .iter()
+            .filter(|f| f.voiced)
+            .map(|f| 1200.0 * (f.fo / 440.0).log2())
+            .collect();
+        let rendered_cents: Vec<f64> = rendered[seg.frames.clone()]
+            .iter()
+            .filter(|f| f.voiced)
+            .map(|f| 1200.0 * (f.fo / 440.0).log2())
+            .collect();
+
+        if original_cents.len() > 2 && rendered_cents.len() > 2 {
+            let orig_var = {
+                let mean = original_cents.iter().sum::<f64>() / original_cents.len() as f64;
+                original_cents
+                    .iter()
+                    .map(|c| (c - mean).powi(2))
+                    .sum::<f64>()
+                    / original_cents.len() as f64
+            };
+            let rend_var = {
+                let mean = rendered_cents.iter().sum::<f64>() / rendered_cents.len() as f64;
+                rendered_cents
+                    .iter()
+                    .map(|c| (c - mean).powi(2))
+                    .sum::<f64>()
+                    / rendered_cents.len() as f64
+            };
+            assert!(
+                rend_var <= orig_var,
+                "vibrato removal should reduce variance: orig={orig_var:.1}, rendered={rend_var:.1}"
+            );
+        }
+    }
+}
+
+#[test]
+fn e2e_time_stretch() {
+    let input = synthetic_input();
+    let mut analyzer = Analyzer::with_defaults(FS);
+    let frames = analyzer.analyze_to_frames(&input);
+    let numbins = frames
+        .first()
+        .map(|f| f.spectral_envelope.len())
+        .unwrap_or(0);
+    let config = SegmentConfig::default();
+    let segs = segment(&frames, FRAME_RATE, &config);
+
+    let edits: Vec<NoteEdit> = segs
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| matches!(s.kind, SegmentKind::Note(_)))
+        .map(|(i, s)| NoteEdit {
+            segment_index: i,
+            target_cents: None,
+            drift_scale: 1.0,
+            vibrato_scale: 1.0,
+            vibrato_rate_scale: 1.0,
+            out_len: Some(s.frames.len() * 2),
+        })
+        .collect();
+
+    let rendered = render(&frames, &segs, &edits, numbins);
+    assert!(
+        rendered.len() > frames.len(),
+        "stretched output should be longer"
+    );
+
+    let mut synth = Synthesizer::with_defaults(FS);
+    let output = synth.synthesize_frames(&rendered);
+    assert!(
+        output.len() > input.len(),
+        "synthesized stretched output should be longer"
+    );
+}
+
+#[test]
+fn e2e_achieved_vs_intended_identity() {
+    let input = synthetic_input();
+    let mut analyzer = Analyzer::with_defaults(FS);
+    let frames = analyzer.analyze_to_frames(&input);
+    let numbins = frames
+        .first()
+        .map(|f| f.spectral_envelope.len())
+        .unwrap_or(0);
+    let config = SegmentConfig::default();
+    let segs = segment(&frames, FRAME_RATE, &config);
+
+    let edits: Vec<NoteEdit> = segs
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| matches!(s.kind, SegmentKind::Note(_)))
+        .map(|(i, _)| NoteEdit::identity(i))
+        .collect();
+
+    let rendered = render(&frames, &segs, &edits, numbins);
+    let mut synth = Synthesizer::with_defaults(FS);
+    let output = synth.synthesize_frames(&rendered);
+
+    let mut re_analyzer = Analyzer::with_defaults(FS);
+    let re_analyzed = re_analyzer.analyze_to_frames(&output);
+
+    // Compare pitch where both rendered and re-analyzed agree on voicing.
+    let n = rendered.len().min(re_analyzed.len());
+    let mut all_errors: Vec<f64> = Vec::new();
+    for i in 0..n {
+        if rendered[i].voiced
+            && re_analyzed[i].voiced
+            && rendered[i].fo > 0.0
+            && re_analyzed[i].fo > 0.0
+        {
+            let intended_cents = 1200.0 * (rendered[i].fo / 440.0).log2();
+            let actual_cents = 1200.0 * (re_analyzed[i].fo / 440.0).log2();
+            all_errors.push((actual_cents - intended_cents).abs());
+        }
+    }
+    assert!(!all_errors.is_empty(), "should have voiced frames");
+    all_errors.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = all_errors[all_errors.len() / 2];
+    let p95_idx = (all_errors.len() as f64 * 0.95) as usize;
+    let p95 = all_errors[p95_idx.min(all_errors.len() - 1)];
+    eprintln!("identity achieved-vs-intended: median={median:.1} cents, p95={p95:.1} cents");
+
+    // The synthetic signal includes a breathy noise region where pitch
+    // tracking is inherently imprecise, so thresholds accommodate that.
+    assert!(
+        median < 100.0,
+        "identity median error too high: {median} cents"
+    );
+    assert!(p95 < 600.0, "identity p95 error too high: {p95} cents");
+}
