@@ -257,31 +257,32 @@ fire on clean speech, so it leaves the C reference agreement above unchanged.
 
 ReIm also ships an **optional, experimental periodicity gate, off by default**.
 The Fo tracker returns a best candidate even on breath or noise, so a fo-in-range
-frame is not necessarily voiced; true voiced frames carry an SRH harmonic score
-orders of magnitude higher. Enabling the gate — `Reim::set_voicing_score_min(x)`,
-or the `REIM_VOICING_SCORE_MIN` env var for the CLI (≈1e3 on Vocadito) — requires
-that score to clear a threshold. On Vocadito (40 clips) it cuts the voicing
-false-alarm rate from 0.67 to 0.19 and lifts voicing F1 from 0.85 to 0.93.
-**Tradeoff:** it also rejects ~5% of true-voiced frames — mostly soft/decaying
-ones and note edges — which then resynthesize as noise instead of pitched pulses
-(audibly clipping soft note tails). The score is level-independent (a power
-ratio), but the threshold is eval-chosen on a single dataset and **needs more
-testing before it could become a default**, hence opt-in. With the default (0.0)
-the gate is inert and voicing matches the faithful C decision.
+frame is not necessarily voiced. The gate thresholds a **fused voicing
+probability**: a logistic combination of the SRH harmonic score, the normalized
+autocorrelation at the pitch lag (NCCF), and the cepstral peak prominence (CPP),
+with weights fit offline (`eval/fit_fusion.py`) on Vocadito + PTDB-TUG speech
+under clean, white-noise, and mains-hum conditions. Enable it with
+`Reim::set_voicing_score_min(x)` (x is a probability, ~0.6) or the
+`REIM_VOICING_SCORE_MIN` env var for the CLI. The gate has hysteresis: once
+voiced, frames stay voiced until the probability falls below 0.8·x, which keeps
+soft note tails from being clipped. With the default (0.0) the gate is inert
+and voicing matches the faithful C decision. The threshold and weights are
+eval-chosen constants; they **need more testing before becoming a default**,
+hence opt-in.
 
-The threshold is the recall/precision dial (Vocadito, 40 clips):
+At `score_min = 0.6` (voicing F1 / recall / false-alarm; PTDB is a stride-64
+subsample of 4718 speech utterances, RAPT laryngograph reference):
 
-| `score_min` | voicing FA | recall | F1   |                                   |
-| ----------- | ---------- | ------ | ---- | --------------------------------- |
-| 0           | 0.67       | 0.997  | 0.85 | off (default; C-faithful voicing) |
-| 1000        | 0.19       | 0.946  | 0.93 | balanced — F1 optimum / the knee  |
-| 1e4         | 0.13       | 0.909  | 0.92 | precision-leaning                 |
+| dataset          | gate off         | fused gate at 0.6 |
+| ---------------- | ---------------- | ----------------- |
+| Vocadito (sung)  | 0.85 / 1.00 / 0.67 | 0.93 / 0.98 / 0.24 |
+| PTDB-TUG (speech)| 0.67 / 0.97 / 0.27 | 0.83 / 0.82 / 0.04 |
 
-1000 is the knee: it removes ~72% of the false alarms for ~5% recall. Lower it
-(toward ~400-600) to lean back toward recall — fewer clipped soft tails, more
-false alarms; raise it for fewer false alarms at more recall cost. Calibrated on
-singing, so another corpus may shift the optimum. (Hysteresis on the gate was
-tried and gave no better recall/precision tradeoff than this single threshold.)
+Against the previous raw-SRH gate (threshold 1000, singing-calibrated), the
+fused gate matches its Vocadito F1 (0.93) at higher recall (0.98 vs 0.95) and
+beats it on speech (0.83 vs 0.79) while keeping RPA 0.76 vs 0.70 — one
+threshold now works across both domains. `Reim::last_voicing_score()` exposes
+the probability per frame; `reim features` dumps all voicing features as CSV.
 
 `reim f0` reports pitch only on frames this decision marks voiced, so the printed
 contour reflects the full voicing logic, not just the raw tracker.

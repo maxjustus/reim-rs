@@ -8,7 +8,8 @@
 use reim::{default_fftsize, read_wav, write_wav_f32, Reim};
 
 // Optional, EXPERIMENTAL: enable the voicing periodicity gate from the CLI via the
-// REIM_VOICING_SCORE_MIN env var (e.g. =1000). Default off. See README "Voicing".
+// REIM_VOICING_SCORE_MIN env var — a fused voicing probability threshold in (0,1),
+// e.g. =0.5. Default off. See README "Voicing".
 fn apply_voicing_env(reim: &mut Reim) {
     if let Some(x) = std::env::var("REIM_VOICING_SCORE_MIN")
         .ok()
@@ -334,7 +335,7 @@ fn cmd_features(input: &str, fmin: Option<&str>, fmax: Option<&str>) -> Result<(
     apply_voicing_env(&mut reim);
     let half = fftsize as f64 / 2.0;
     let mut last = 0u64;
-    let mut out = String::from("frame,time,silence,fo,voiced,score,nccf,cpp\n");
+    let mut out = String::from("frame,time,silence,fo,voiced,score,nccf,cpp,prob\n");
     for (i, &x) in wav.samples.iter().enumerate() {
         reim.process_sample(x);
         if reim.frame_count() != last {
@@ -342,7 +343,7 @@ fn cmd_features(input: &str, fmin: Option<&str>, fmax: Option<&str>) -> Result<(
             let t = ((i as f64 - half) / fs).max(0.0);
             let f = reim.last_voicing_features();
             out.push_str(&format!(
-                "{},{t:.6},{},{:.4},{},{:.6e},{:.6},{:.6}\n",
+                "{},{t:.6},{},{:.4},{},{:.6e},{:.6},{:.6},{:.6}\n",
                 last - 1,
                 reim.last_silence() as u8,
                 reim.last_fo(),
@@ -350,6 +351,7 @@ fn cmd_features(input: &str, fmin: Option<&str>, fmax: Option<&str>) -> Result<(
                 f.score,
                 f.nccf,
                 f.cpp,
+                reim.last_voicing_score(),
             ));
         }
     }

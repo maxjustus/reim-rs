@@ -917,17 +917,38 @@ struct ApAnalyzer {
     x_real: Vec<f64>,
     x_imag: Vec<f64>,
     d4c: D4c,
-    score_min: f64, // periodicity-gate threshold; 0.0 = gate off (default)
+    score_min: f64, // periodicity-gate threshold on the fused probability; 0.0 = gate off
     score_gate: SchmittGate,
+    last_probability: f64,
 }
 
 // Hysteresis ratio for the opt-in score gate: once voiced, a frame stays voiced
-// until its score drops below this fraction of `score_min`. Recovers soft note
-// tails whose SRH score decays smoothly through the threshold. Eval-chosen on
-// Vocadito at score_min=1000 (sweep 1.0/0.3/0.1/0.03): 0.1 lifts voicing recall
-// 0.946->0.960 and RPA 0.933->0.944 with F1 flat (0.926->0.925). Internal, not
-// part of the public API.
-const VOICING_SCORE_HYSTERESIS: f64 = 0.1;
+// until the fused probability drops below this fraction of `score_min`.
+// Recovers soft note tails whose probability decays smoothly through the
+// threshold. Eval-chosen at score_min=0.6 (sweep 0.9/0.8/0.5/0.1): 0.8 gives
+// voicing F1 0.932 on Vocadito / 0.830 on PTDB stride-64, with Vocadito recall
+// 0.979. Internal, not part of the public API.
+const VOICING_SCORE_HYSTERESIS: f64 = 0.8;
+
+// Logistic-regression fusion of the voicing features into a probability.
+// Weights fit offline (eval/fit_fusion.py) on raw features [ln(score), nccf,
+// cpp]; dataset and resulting metrics recorded in the commit that set them.
+// Calibrated for the default (fs, fftsize) config, like the other eval-chosen
+// constants. Internal, not part of the public API.
+// Fit over Vocadito (40 clips) + PTDB-TUG (295-clip stride-16 subsample), each
+// under clean/white20/white10/hum50 conditions (~1.8M frames): held-out F1
+// 0.874, AUC 0.953 pooled; 0.955 on clean Vocadito at threshold 0.5.
+const FUSION_BIAS: f64 = -3.077462961437281;
+const FUSION_WEIGHTS: [f64; 3] = [0.07029391640284875, 5.275854261068518, 1.2496788274186972];
+
+/// Fused voicing probability in (0,1): sigmoid of the weighted features.
+fn voicing_probability(f: VoicingFeatures) -> f64 {
+    let z = FUSION_BIAS
+        + FUSION_WEIGHTS[0] * f.score.max(1e-12).ln()
+        + FUSION_WEIGHTS[1] * f.nccf
+        + FUSION_WEIGHTS[2] * f.cpp;
+    1.0 / (1.0 + (-z).exp())
+}
 
 /// Schmitt trigger for the score gate: enter voiced at `score >= high`, stay
 /// until `score < high * VOICING_SCORE_HYSTERESIS`. The caller latches `open`
@@ -1556,22 +1577,24 @@ impl ApAnalyzer {
             d4c: D4c::new(cfg),
             score_min: 0.0,
             score_gate: SchmittGate { open: false },
+            last_probability: 0.0,
         }
     }
 
     /// Returns true for a voiced frame; writes per-bin aperiodicity into `ap`.
     /// Voiced frames get WORLD D4C band-aperiodicity; everything else is fully
-    /// aperiodic (1.0), matching the placeholder's unvoiced behaviour. `score` is
-    /// the Fo tracker's SRH harmonic score; the optional periodicity gate
-    /// (`score >= score_min`, default 0.0 = off) rejects low-periodicity frames
-    /// (see [`Reim::set_voicing_score_min`]). It is opt-in/experimental.
+    /// aperiodic (1.0), matching the placeholder's unvoiced behaviour.
+    /// `features` are the Fo tracker's per-frame voicing features; the optional
+    /// periodicity gate (fused probability >= score_min, default 0.0 = off)
+    /// rejects low-periodicity frames (see [`Reim::set_voicing_score_min`]).
+    /// It is opt-in/experimental.
     fn analyze(
         &mut self,
         cfg: &Config,
         fft: &mut Fft,
         input: &[f64],
         fo: f64,
-        score: f64,
+        features: VoicingFeatures,
         issilence: bool,
         ap: &mut [f64],
     ) -> bool {
@@ -1580,10 +1603,13 @@ impl ApAnalyzer {
         // or fo is out of range. The negated range test (rather than `>=`/`<=`) makes
         // a NaN fo fall through to the V/UV decision, matching C's `<`/`>` semantics.
         let out_of_range = fo < cfg.fo_floor || fo > cfg.fo_ceil;
-        let score_pass = self.score_min <= 0.0 || self.score_gate.pass(score, self.score_min);
-        let voiced = !issilence
+        self.last_probability = voicing_probability(features);
+        let score_pass = self.score_min <= 0.0
+            || self
+                .score_gate
+                .pass(self.last_probability, self.score_min);
+        let gates_pass = !issilence
             && !out_of_range
-            && score_pass
             && !low_band_dominated(
                 input,
                 &mut self.x_real,
@@ -1602,6 +1628,7 @@ impl ApAnalyzer {
                 cfg.fs,
                 fft,
             );
+        let voiced = gates_pass && score_pass;
         self.score_gate.open = voiced;
         if voiced {
             self.d4c
@@ -2155,12 +2182,13 @@ impl Analyzer {
         );
         let silence = analyze_silence(&self.cfg, wave, SILENCE_THRESHOLD);
         let fo = self.fo.analyze(&self.cfg, &mut self.fft, wave, wave_d);
+        let features = self.voicing_features();
         let voiced = self.ap.analyze(
             &self.cfg,
             &mut self.fft,
             wave,
             fo,
-            self.fo.last_score,
+            features,
             silence,
             &mut self.ap_buf,
         );
@@ -2242,16 +2270,24 @@ impl Analyzer {
             cpp: self.fo.last_cpp,
         }
     }
-    /// Set the minimum SRH harmonic score for a frame to be judged voiced
-    /// (default 0.0 = off). Above 0 this is an opt-in, EXPERIMENTAL periodicity
-    /// gate: the Fo tracker returns a candidate even on breath/noise, and true
-    /// voiced frames score orders of magnitude higher, so a threshold (~1e3 on
-    /// Vocadito) cuts voicing false alarms sharply. Tradeoff: it also rejects
-    /// some soft/decaying true-voiced frames. The gate has hysteresis: once a
-    /// frame is voiced, following frames stay voiced until the score falls
+    /// Fused voicing probability in (0,1) for the most recent frame: a
+    /// logistic combination of the voicing features (internal eval-fit
+    /// weights). This is the value the opt-in gate thresholds
+    /// ([`set_voicing_score_min`](Self::set_voicing_score_min)); it is
+    /// computed every frame regardless of the gate.
+    pub fn voicing_score(&self) -> f64 {
+        self.ap.last_probability
+    }
+    /// Set the minimum fused voicing probability (see
+    /// [`voicing_score`](Self::voicing_score)) for a frame to be judged voiced
+    /// (default 0.0 = off). Above 0 this is an opt-in, EXPERIMENTAL
+    /// periodicity gate: the Fo tracker returns a candidate even on
+    /// breath/noise; a threshold around 0.5 cuts voicing false alarms
+    /// sharply at a small recall cost. The gate has hysteresis: once a frame
+    /// is voiced, following frames stay voiced until the probability falls
     /// below a fraction of `min` ([`VOICING_SCORE_HYSTERESIS`], internal),
-    /// which keeps soft note tails from being clipped. See
-    /// `plans/merge-d4c-and-vfa.md` and the README "Voicing" section.
+    /// which keeps soft note tails from being clipped. See the README
+    /// "Voicing" section.
     pub fn set_voicing_score_min(&mut self, min: f64) {
         self.ap.score_min = min;
     }
@@ -2409,8 +2445,13 @@ impl Reim {
     pub fn last_voicing_features(&self) -> VoicingFeatures {
         self.analyzer.voicing_features()
     }
-    /// Set the minimum SRH harmonic score for a frame to be judged voiced
-    /// (default 0.0 = off). See [`Analyzer::set_voicing_score_min`].
+    /// Fused voicing probability for the most recent frame. See
+    /// [`Analyzer::voicing_score`].
+    pub fn last_voicing_score(&self) -> f64 {
+        self.analyzer.voicing_score()
+    }
+    /// Set the minimum fused voicing probability for a frame to be judged
+    /// voiced (default 0.0 = off). See [`Analyzer::set_voicing_score_min`].
     pub fn set_voicing_score_min(&mut self, min: f64) {
         self.analyzer.set_voicing_score_min(min);
     }
@@ -2571,12 +2612,13 @@ impl Reim {
                 let fo = analyzer.fo.analyze(&cfg, &mut analyzer.fft, wave, wave_d);
                 t_fo += t.elapsed().as_secs_f64();
                 let t = Instant::now();
+                let features = analyzer.voicing_features();
                 let voiced = analyzer.ap.analyze(
                     &cfg,
                     &mut analyzer.fft,
                     wave,
                     fo,
-                    analyzer.fo.last_score,
+                    features,
                     silence,
                     &mut analyzer.ap_buf,
                 );
@@ -2858,6 +2900,20 @@ mod tests {
     }
 
     #[test]
+    fn voicing_probability_monotone_in_each_feature() {
+        let base = VoicingFeatures {
+            score: 100.0,
+            nccf: 0.5,
+            cpp: 0.5,
+        };
+        let p = voicing_probability(base);
+        assert!(p > 0.0 && p < 1.0);
+        assert!(voicing_probability(VoicingFeatures { score: 1e4, ..base }) > p);
+        assert!(voicing_probability(VoicingFeatures { nccf: 0.9, ..base }) > p);
+        assert!(voicing_probability(VoicingFeatures { cpp: 1.5, ..base }) > p);
+    }
+
+    #[test]
     fn schmitt_gate_hysteresis() {
         let high = 1000.0;
         let low = high * VOICING_SCORE_HYSTERESIS;
@@ -3127,7 +3183,11 @@ mod tests {
             &mut fft,
             &input,
             f64::NAN,
-            f64::INFINITY,
+            VoicingFeatures {
+                score: f64::INFINITY,
+                nccf: 1.0,
+                cpp: 1.0,
+            },
             false,
             &mut buf,
         );

@@ -32,11 +32,11 @@ def run_reim_features(reim_bin, wav_path):
     return {n: rows[:, i] for i, n in enumerate(names)}
 
 
-def collect(reim_bin, datasets, conditions, limit):
+def collect(reim_bin, datasets, conditions, limit, stride=1):
     xs, ys, groups = [], [], []
     for ds_name in datasets:
         loader, data_dir = DATASETS[ds_name]
-        clips = list(loader(data_dir))
+        clips = list(loader(data_dir))[::stride]
         if limit is not None:
             clips = clips[:limit]
         for clip_id, wav, ref_time, ref_freq in clips:
@@ -113,6 +113,7 @@ def main(argv=None):
     parser.add_argument("--dataset", choices=[*DATASETS, "all"], default="all")
     parser.add_argument("--noise", choices=[*NOISE_CONDITIONS, "all"], default="all")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--stride", type=int, default=1, help="Take every Nth clip (speaker-diverse subsample).")
     parser.add_argument("--val-frac", type=float, default=0.2)
     args = parser.parse_args(argv)
 
@@ -123,7 +124,7 @@ def main(argv=None):
         print("no datasets present", file=sys.stderr)
         return 1
 
-    x, y, groups = collect(args.reim, datasets, conditions, args.limit)
+    x, y, groups = collect(args.reim, datasets, conditions, args.limit, args.stride)
     print(f"{len(y)} frames, {y.mean():.1%} voiced, from {sorted(set(groups))}")
 
     # deterministic train/val split by frame index stride

@@ -269,7 +269,7 @@ def aggregate(per_clip):
     }
 
 
-def run_datasets(reim_bin, datasets, conditions, limit=None, quiet=False):
+def run_datasets(reim_bin, datasets, conditions, limit=None, quiet=False, stride=1):
     """Evaluate every (dataset, noise condition) group; returns the pooled
     per-clip rows, or None when no clips were found. Prints per-group tables
     and a pooled MEAN unless quiet."""
@@ -277,7 +277,7 @@ def run_datasets(reim_bin, datasets, conditions, limit=None, quiet=False):
     invocation_printed = False
     for ds_name in datasets:
         loader, data_dir = DATASETS[ds_name]
-        clips = list(loader(data_dir))
+        clips = list(loader(data_dir))[::stride]
         if limit is not None:
             clips = clips[:limit]
         if not clips:
@@ -421,6 +421,12 @@ def main(argv=None):
         help="Only evaluate the first N clips (smoke runs).",
     )
     parser.add_argument(
+        "--stride",
+        type=int,
+        default=1,
+        help="Take every Nth clip (speaker-diverse subsample for large datasets).",
+    )
+    parser.add_argument(
         "--dataset",
         choices=[*DATASETS, "all"],
         default="vocadito",
@@ -471,7 +477,12 @@ def main(argv=None):
         for v in args.sweep.split(","):
             os.environ["REIM_VOICING_SCORE_MIN"] = v
             pooled = run_datasets(
-                args.reim, datasets, conditions, limit=args.limit, quiet=True
+                args.reim,
+                datasets,
+                conditions,
+                limit=args.limit,
+                quiet=True,
+                stride=args.stride,
             )
             if pooled is None:
                 return 1
@@ -479,7 +490,9 @@ def main(argv=None):
             print(v.ljust(LABEL_WIDTH) + "".join(f"{m[k]:8.3f}" for k, _ in COLUMNS))
         return 0
 
-    pooled = run_datasets(args.reim, datasets, conditions, limit=args.limit)
+    pooled = run_datasets(
+        args.reim, datasets, conditions, limit=args.limit, stride=args.stride
+    )
     return 0 if pooled is not None else 1
 
 
