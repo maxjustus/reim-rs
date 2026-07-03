@@ -1,5 +1,6 @@
 use reim::segment::{
-    clean_contour, contour_svg, decompose_contour, segment, SegmentConfig, SegmentKind,
+    clean_contour, contour_svg, decompose_contour, render, segment, NoteEdit, SegmentConfig,
+    SegmentKind,
 };
 use reim::{Analyzer, Frame, Reim, Synthesizer};
 
@@ -453,6 +454,146 @@ fn contour_svg_structural() {
     assert!(
         svg.contains("polyline") || svg.contains("line"),
         "should have contour lines"
+    );
+}
+
+// --- render tests ---
+
+#[test]
+fn render_identity_preserves_frames() {
+    let frames: Vec<Frame> = (0..50)
+        .map(|i| Frame {
+            fo: 200.0 + i as f64,
+            voiced: true,
+            silence: false,
+            aperiodicity: vec![0.1; 10],
+            spectral_envelope: vec![1.0; 10],
+        })
+        .collect();
+    let config = SegmentConfig::default();
+    let segs = segment(&frames, 200.0, &config);
+
+    let edits: Vec<NoteEdit> = segs
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| matches!(s.kind, SegmentKind::Note(_)))
+        .map(|(i, _)| NoteEdit::identity(i))
+        .collect();
+
+    let rendered = render(&frames, &segs, &edits, 10);
+    assert_eq!(rendered.len(), frames.len());
+
+    for (i, (orig, rend)) in frames.iter().zip(rendered.iter()).enumerate() {
+        let err = (orig.fo - rend.fo).abs();
+        assert!(err < 0.1, "frame {i}: fo mismatch {err}");
+    }
+}
+
+#[test]
+fn render_pitch_correction() {
+    let frames: Vec<Frame> = (0..50)
+        .map(|_| Frame {
+            fo: 220.0,
+            voiced: true,
+            silence: false,
+            aperiodicity: vec![0.1; 10],
+            spectral_envelope: vec![1.0; 10],
+        })
+        .collect();
+    let config = SegmentConfig::default();
+    let segs = segment(&frames, 200.0, &config);
+
+    let edits = vec![NoteEdit {
+        segment_index: 0,
+        target_cents: Some(0.0), // A4
+        drift_scale: 0.0,
+        vibrato_scale: 1.0,
+        vibrato_rate_scale: 1.0,
+        out_len: None,
+    }];
+
+    let rendered = render(&frames, &segs, &edits, 10);
+    for f in &rendered {
+        if f.voiced {
+            let cents = 1200.0 * (f.fo / 440.0).log2();
+            assert!(cents.abs() < 5.0, "should be near A4, got {} cents", cents);
+        }
+    }
+}
+
+#[test]
+fn render_vibrato_removal() {
+    let pi = std::f64::consts::PI;
+    let frames: Vec<Frame> = (0..100)
+        .map(|i| {
+            let t = i as f64 / 200.0;
+            let vib = 30.0 * (2.0 * pi * 6.0 * t).sin();
+            Frame {
+                fo: 440.0 * 2.0_f64.powf(vib / 1200.0),
+                voiced: true,
+                silence: false,
+                aperiodicity: vec![0.1; 10],
+                spectral_envelope: vec![1.0; 10],
+            }
+        })
+        .collect();
+    let config = SegmentConfig::default();
+    let segs = segment(&frames, 200.0, &config);
+
+    let edits = vec![NoteEdit {
+        segment_index: 0,
+        target_cents: None,
+        drift_scale: 1.0,
+        vibrato_scale: 0.0,
+        vibrato_rate_scale: 1.0,
+        out_len: None,
+    }];
+
+    let rendered = render(&frames, &segs, &edits, 10);
+    let cents: Vec<f64> = rendered
+        .iter()
+        .filter(|f| f.voiced)
+        .map(|f| 1200.0 * (f.fo / 440.0).log2())
+        .collect();
+    if cents.len() > 2 {
+        let mean = cents.iter().sum::<f64>() / cents.len() as f64;
+        let var = cents.iter().map(|c| (c - mean).powi(2)).sum::<f64>() / cents.len() as f64;
+        let std_dev = var.sqrt();
+        assert!(
+            std_dev < 10.0,
+            "vibrato should be reduced, std_dev={std_dev}"
+        );
+    }
+}
+
+#[test]
+fn render_time_stretch() {
+    let frames: Vec<Frame> = (0..50)
+        .map(|_| Frame {
+            fo: 300.0,
+            voiced: true,
+            silence: false,
+            aperiodicity: vec![0.1; 10],
+            spectral_envelope: vec![1.0; 10],
+        })
+        .collect();
+    let config = SegmentConfig::default();
+    let segs = segment(&frames, 200.0, &config);
+
+    let edits = vec![NoteEdit {
+        segment_index: 0,
+        target_cents: None,
+        drift_scale: 1.0,
+        vibrato_scale: 1.0,
+        vibrato_rate_scale: 1.0,
+        out_len: Some(100),
+    }];
+
+    let rendered = render(&frames, &segs, &edits, 10);
+    assert_eq!(
+        rendered.len(),
+        100,
+        "time stretch 2x should double frame count"
     );
 }
 

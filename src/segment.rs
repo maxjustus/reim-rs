@@ -464,6 +464,157 @@ pub fn segment(frames: &[Frame], frame_rate_hz: f64, config: &SegmentConfig) -> 
     segments
 }
 
+pub struct NoteEdit {
+    pub segment_index: usize,
+    pub target_cents: Option<f64>,
+    pub drift_scale: f64,
+    pub vibrato_scale: f64,
+    pub vibrato_rate_scale: f64,
+    pub out_len: Option<usize>,
+}
+
+impl NoteEdit {
+    pub fn identity(segment_index: usize) -> Self {
+        NoteEdit {
+            segment_index,
+            target_cents: None,
+            drift_scale: 1.0,
+            vibrato_scale: 1.0,
+            vibrato_rate_scale: 1.0,
+            out_len: None,
+        }
+    }
+}
+
+fn lerp_track(track: &[f64], s: f64) -> f64 {
+    if track.is_empty() {
+        return 0.0;
+    }
+    let idx = (s.floor() as usize).min(track.len() - 1);
+    let idx1 = (idx + 1).min(track.len() - 1);
+    let t = s - s.floor();
+    track[idx] * (1.0 - t) + track[idx1] * t
+}
+
+pub fn render(
+    frames: &[Frame],
+    segments: &[Segment],
+    edits: &[NoteEdit],
+    _numbins: usize,
+) -> Vec<Frame> {
+    let mut output = Vec::new();
+
+    for (seg_idx, seg) in segments.iter().enumerate() {
+        let edit = edits.iter().find(|e| e.segment_index == seg_idx);
+        let src_len = seg.frames.end - seg.frames.start;
+
+        match &seg.kind {
+            SegmentKind::Unvoiced => {
+                let out_len = edit.and_then(|e| e.out_len).unwrap_or(src_len);
+                for j in 0..out_len {
+                    let s = if out_len <= 1 {
+                        0.0
+                    } else {
+                        j as f64 * (src_len - 1) as f64 / (out_len - 1) as f64
+                    };
+                    let idx = (s.floor() as usize).min(src_len - 1);
+                    let abs_idx = seg.frames.start + idx;
+                    output.push(frames[abs_idx].clone());
+                }
+            }
+            SegmentKind::Note(nc) => {
+                let identity;
+                let edit = match edit {
+                    Some(e) => e,
+                    None => {
+                        identity = NoteEdit::identity(seg_idx);
+                        &identity
+                    }
+                };
+                let out_len = edit.out_len.unwrap_or(src_len);
+                if out_len == 0 {
+                    continue;
+                }
+
+                let mut phi = lerp_track(&nc.vibrato_phase, 0.0);
+                let mut prev_s_phase = lerp_track(&nc.vibrato_phase, 0.0);
+
+                for j in 0..out_len {
+                    let s = if out_len <= 1 {
+                        0.0
+                    } else {
+                        j as f64 * (src_len - 1) as f64 / (out_len - 1) as f64
+                    };
+                    let idx = (s.floor() as usize).min(src_len - 1);
+                    let idx1 = (idx + 1).min(src_len - 1);
+                    let t = s - s.floor();
+                    let abs_idx = seg.frames.start + idx;
+                    let abs_idx1 = seg.frames.start + idx1;
+
+                    let fa = &frames[abs_idx];
+                    let fb = &frames[abs_idx1];
+
+                    // Spectral envelope: log-power interpolation
+                    let floor = 1e-16_f64;
+                    let spectral_envelope: Vec<f64> = fa
+                        .spectral_envelope
+                        .iter()
+                        .zip(fb.spectral_envelope.iter())
+                        .map(|(&a, &b)| {
+                            let la = a.max(floor).ln();
+                            let lb = b.max(floor).ln();
+                            (la * (1.0 - t) + lb * t).exp()
+                        })
+                        .collect();
+
+                    // Aperiodicity: linear interpolation
+                    let aperiodicity: Vec<f64> = fa
+                        .aperiodicity
+                        .iter()
+                        .zip(fb.aperiodicity.iter())
+                        .map(|(&a, &b)| a * (1.0 - t) + b * t)
+                        .collect();
+
+                    // Voiced/silence: nearest
+                    let nearest = if t < 0.5 { fa } else { fb };
+                    let voiced = nearest.voiced;
+                    let silence = nearest.silence;
+
+                    // Reconstruct fo from contour model
+                    let cur_phase = lerp_track(&nc.vibrato_phase, s);
+                    if j == 0 {
+                        phi = cur_phase;
+                    } else {
+                        phi += edit.vibrato_rate_scale * (cur_phase - prev_s_phase);
+                    }
+                    prev_s_phase = cur_phase;
+
+                    let drift = lerp_track(&nc.drift, s);
+                    let vib_amp = lerp_track(&nc.vibrato_amp, s);
+                    let residual = lerp_track(&nc.residual, s);
+
+                    let center = edit.target_cents.unwrap_or(nc.center_cents);
+                    let cents_out = center
+                        + edit.drift_scale * drift
+                        + edit.vibrato_scale * vib_amp * phi.sin()
+                        + residual;
+                    let fo = cents_to_hz(cents_out);
+
+                    output.push(Frame {
+                        fo,
+                        voiced,
+                        silence,
+                        aperiodicity,
+                        spectral_envelope,
+                    });
+                }
+            }
+        }
+    }
+
+    output
+}
+
 fn note_name(cents: f64) -> String {
     let midi = (69.0 + cents / 100.0).round() as i32;
     const NAMES: [&str; 12] = [
