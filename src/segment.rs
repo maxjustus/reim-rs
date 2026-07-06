@@ -145,9 +145,14 @@ fn autocorrelation(signal: &[f64]) -> Vec<f64> {
     result
 }
 
-fn bandpass_fft(signal: &[f64], center_hz: f64, half_width_hz: f64, sample_rate: f64) -> Vec<f64> {
+fn bandpass_fft(
+    signal: &[f64],
+    center_hz: f64,
+    half_width_hz: f64,
+    sample_rate: f64,
+    planner: &mut FftPlanner<f64>,
+) -> Vec<f64> {
     let n = signal.len();
-    let mut planner = FftPlanner::<f64>::new();
     let fft = planner.plan_fft_forward(n);
     let ifft = planner.plan_fft_inverse(n);
 
@@ -172,27 +177,20 @@ fn bandpass_fft(signal: &[f64], center_hz: f64, half_width_hz: f64, sample_rate:
     buf.iter().map(|c| c.re / n as f64).collect()
 }
 
-fn hilbert_analytic(signal: &[f64]) -> Vec<Complex<f64>> {
+fn hilbert_analytic(signal: &[f64], planner: &mut FftPlanner<f64>) -> Vec<Complex<f64>> {
     let n = signal.len();
-    let mut planner = FftPlanner::<f64>::new();
     let fft = planner.plan_fft_forward(n);
     let ifft = planner.plan_fft_inverse(n);
 
     let mut buf: Vec<Complex<f64>> = signal.iter().map(|&x| Complex::new(x, 0.0)).collect();
     fft.process(&mut buf);
 
-    // Zero negative frequencies, double positive, keep DC and Nyquist
-    // DC (index 0): unchanged
-    // Positive frequencies: indices 1..n/2 -> multiply by 2
-    // Nyquist (index n/2 if n is even): unchanged
-    // Negative frequencies: indices n/2+1..n -> zero
     for i in 1..n {
         if i < n.div_ceil(2) {
             buf[i] *= 2.0;
         } else if i > n / 2 {
             buf[i] = Complex::new(0.0, 0.0);
         }
-        // i == n/2 (Nyquist for even n): unchanged
     }
 
     ifft.process(&mut buf);
@@ -215,7 +213,12 @@ fn unwrap_phase(phase: &mut [f64]) {
     }
 }
 
-pub fn decompose_contour(fo_hz: &[f64], frame_rate_hz: f64, config: &SegmentConfig) -> NoteContour {
+pub fn decompose_contour(
+    fo_hz: &[f64],
+    frame_rate_hz: f64,
+    config: &SegmentConfig,
+    planner: &mut FftPlanner<f64>,
+) -> NoteContour {
     let n = fo_hz.len();
     let cents: Vec<f64> = fo_hz.iter().map(|&f| hz_to_cents(f)).collect();
 
@@ -289,8 +292,8 @@ pub fn decompose_contour(fo_hz: &[f64], frame_rate_hz: f64, config: &SegmentConf
     let vibrato_rate = frame_rate_hz / best_lag as f64;
 
     // Bandpass around detected rate ±1Hz, then Hilbert
-    let bandpassed = bandpass_fft(&detrended, vibrato_rate, 1.0, frame_rate_hz);
-    let analytic = hilbert_analytic(&bandpassed);
+    let bandpassed = bandpass_fft(&detrended, vibrato_rate, 1.0, frame_rate_hz, planner);
+    let analytic = hilbert_analytic(&bandpassed, planner);
 
     let vibrato_amp: Vec<f64> = analytic.iter().map(|c| c.norm()).collect();
     // Shift phase by pi/2 so that amp * sin(phase) = real part of analytic signal
@@ -321,6 +324,7 @@ pub fn segment(frames: &[Frame], frame_rate_hz: f64, config: &SegmentConfig) -> 
         return Vec::new();
     }
 
+    let mut planner = FftPlanner::<f64>::new();
     let cleaned = clean_contour(frames, config.median_window);
 
     // Split into voiced/unvoiced runs.
@@ -455,7 +459,12 @@ pub fn segment(frames: &[Frame], frame_rate_hz: f64, config: &SegmentConfig) -> 
                 let fo_slice: Vec<f64> = (range.start..range.end).map(|j| frames[j].fo).collect();
                 segments.push(Segment {
                     frames: range,
-                    kind: SegmentKind::Note(decompose_contour(&fo_slice, frame_rate_hz, config)),
+                    kind: SegmentKind::Note(decompose_contour(
+                        &fo_slice,
+                        frame_rate_hz,
+                        config,
+                        &mut planner,
+                    )),
                 });
             }
         }
@@ -496,12 +505,7 @@ fn lerp_track(track: &[f64], s: f64) -> f64 {
     track[idx] * (1.0 - t) + track[idx1] * t
 }
 
-pub fn render(
-    frames: &[Frame],
-    segments: &[Segment],
-    edits: &[NoteEdit],
-    _numbins: usize,
-) -> Vec<Frame> {
+pub fn render(frames: &[Frame], segments: &[Segment], edits: &[NoteEdit]) -> Vec<Frame> {
     let mut output = Vec::new();
 
     for (seg_idx, seg) in segments.iter().enumerate() {
@@ -597,7 +601,7 @@ pub fn render(
                     let cents_out = center
                         + edit.drift_scale * drift
                         + edit.vibrato_scale * vib_amp * phi.sin()
-                        + residual;
+                        + edit.drift_scale * residual;
                     let fo = cents_to_hz(cents_out);
 
                     output.push(Frame {
