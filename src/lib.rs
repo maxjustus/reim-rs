@@ -689,9 +689,10 @@ impl ScoreFloor {
             return -SCORE_FLOOR_RANGE;
         }
         let lscore = score.ln();
-        self.floor_ln = lscore
-            .min(self.floor_ln + SCORE_FLOOR_RISE)
-            .clamp(SCORE_FLOOR_PRIOR - SCORE_FLOOR_RANGE, SCORE_FLOOR_PRIOR + SCORE_FLOOR_RANGE);
+        self.floor_ln = lscore.min(self.floor_ln + SCORE_FLOOR_RISE).clamp(
+            SCORE_FLOOR_PRIOR - SCORE_FLOOR_RANGE,
+            SCORE_FLOOR_PRIOR + SCORE_FLOOR_RANGE,
+        );
         lscore - self.floor_ln
     }
 }
@@ -962,7 +963,7 @@ struct ApAnalyzer {
     score_min: f64, // periodicity-gate threshold on the fused probability; 0.0 = gate off
     score_gate: SchmittGate,
     last_probability: f64,
-    soft_mode: bool,    // run D4C on borderline frames so soft synthesis has a pulse spectrum
+    soft_mode: bool, // run D4C on borderline frames so soft synthesis has a pulse spectrum
     last_strength: f64, // fused probability when the hard gates pass, else 0.0
 }
 
@@ -1652,10 +1653,8 @@ impl ApAnalyzer {
         // a NaN fo fall through to the V/UV decision, matching C's `<`/`>` semantics.
         let out_of_range = fo < cfg.fo_floor || fo > cfg.fo_ceil;
         self.last_probability = voicing_probability(features);
-        let score_pass = self.score_min <= 0.0
-            || self
-                .score_gate
-                .pass(self.last_probability, self.score_min);
+        let score_pass =
+            self.score_min <= 0.0 || self.score_gate.pass(self.last_probability, self.score_min);
         let gates_pass = !issilence
             && !out_of_range
             && !low_band_dominated(
@@ -2053,8 +2052,7 @@ impl Synth {
         // The fo range guard matters for fractional strength: a borderline
         // frame can carry strength > 0 with fo = 0.0, and `interval = fs/fo`
         // must never see that.
-        self.has_pulse =
-            strength > 0.0 && !issilence && fo >= cfg.fo_floor && fo <= cfg.fo_ceil;
+        self.has_pulse = strength > 0.0 && !issilence && fo >= cfg.fo_floor && fo <= cfg.fo_ceil;
         if self.has_pulse {
             self.interval = fs / fo;
             let gain_pulse = self.interval.sqrt();
@@ -2699,7 +2697,9 @@ impl Reim {
         let (mut t_pulse_gen, mut pulse_gen_count) = (0.0, 0usize);
         let mut frame_latencies = Vec::new();
         for &x in samples {
-            let Reim { analyzer, synth, .. } = &mut r;
+            let Reim {
+                analyzer, synth, ..
+            } = &mut r;
             if analyzer.framer.next(x, &mut analyzer.frame_window) {
                 let frame_t0 = Instant::now();
                 let (wave_d, wave) = (
@@ -2929,10 +2929,24 @@ mod tests {
         let pspec_voiced = pspec_of(&voiced, &mut fft);
         let pspec_noise = pspec_of(&noise, &mut fft);
         let cpp_voiced = cepstral_peak_prominence(
-            &pspec_voiced, numbins, fs, 71.0, 800.0, &mut re, &mut im, &mut fft,
+            &pspec_voiced,
+            numbins,
+            fs,
+            71.0,
+            800.0,
+            &mut re,
+            &mut im,
+            &mut fft,
         );
         let cpp_noise = cepstral_peak_prominence(
-            &pspec_noise, numbins, fs, 71.0, 800.0, &mut re, &mut im, &mut fft,
+            &pspec_noise,
+            numbins,
+            fs,
+            71.0,
+            800.0,
+            &mut re,
+            &mut im,
+            &mut fft,
         );
         assert!(
             cpp_voiced > 2.0 * cpp_noise,
@@ -2943,7 +2957,14 @@ mod tests {
         let tiny = vec![1e-20; fftsize];
         let pspec_tiny = pspec_of(&tiny, &mut fft);
         let cpp_tiny = cepstral_peak_prominence(
-            &pspec_tiny, numbins, fs, 71.0, 800.0, &mut re, &mut im, &mut fft,
+            &pspec_tiny,
+            numbins,
+            fs,
+            71.0,
+            800.0,
+            &mut re,
+            &mut im,
+            &mut fft,
         );
         assert!(cpp_tiny.is_finite());
     }
