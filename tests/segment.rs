@@ -616,6 +616,152 @@ fn render_identity_with_glide() {
     }
 }
 
+// --- glide edit tests ---
+
+/// (frames, segments, a_len, glide_len, entry_cents) for the standard
+/// two-note glide fixture. a_len is the first note's frame count.
+fn glide_fixture() -> (Vec<Frame>, Vec<reim::segment::Segment>, usize, usize, f64) {
+    let frames = glide_input(200.0, 300.0, 60, 20);
+    let segs = segment(&frames, FRAME_RATE, &SegmentConfig::default());
+    let notes = note_contours(&segs);
+    assert_eq!(notes.len(), 2);
+    let a_len = segs[0].frames.len();
+    let g = notes[1].onset_glide.len();
+    assert!(g >= 2, "fixture must produce a glide");
+    let entry = hz_to_cents(frames[segs[1].frames.start + g].fo);
+    (frames, segs, a_len, g, entry)
+}
+
+#[test]
+fn render_glide_retargets_after_pitch_edit() {
+    let (frames, segs, a_len, g, old_entry) = glide_fixture();
+    let mut edit = NoteEdit::identity(1);
+    let center = match &segs[1].kind {
+        SegmentKind::Note(nc) => nc.center_cents,
+        _ => unreachable!(),
+    };
+    edit.target_cents = Some(center + 100.0);
+    let rendered = render(&frames, &segs, &[edit]);
+    assert_eq!(rendered.len(), frames.len());
+
+    let exit = hz_to_cents(rendered[a_len - 1].fo);
+    let entry = hz_to_cents(rendered[a_len + g].fo);
+    assert!(
+        (entry - (old_entry + 100.0)).abs() < 1e-6,
+        "entry {entry} should be old entry + 100"
+    );
+    // The glide must connect exit to the NEW entry without a jump.
+    let depth = entry - exit;
+    let max_step = (depth.abs() / g as f64) * 3.0 + 1.0;
+    for i in a_len..=a_len + g {
+        let step = hz_to_cents(rendered[i].fo) - hz_to_cents(rendered[i - 1].fo);
+        assert!(
+            step.abs() < max_step,
+            "jump of {step} cents at frame {i} (max {max_step})"
+        );
+    }
+}
+
+#[test]
+fn render_glide_scale_zero_is_hard_step() {
+    let (frames, segs, a_len, g, entry) = glide_fixture();
+    let mut edit = NoteEdit::identity(1);
+    edit.glide_scale = 0.0;
+    let rendered = render(&frames, &segs, &[edit]);
+    assert_eq!(rendered.len(), frames.len(), "duration unchanged");
+    for i in a_len..a_len + g {
+        let c = hz_to_cents(rendered[i].fo);
+        assert!(
+            (c - entry).abs() < 1e-9,
+            "glide frame {i} at {c}, expected entry pitch {entry}"
+        );
+    }
+}
+
+#[test]
+fn render_glide_time_scale_stretches_glide() {
+    let (frames, segs, a_len, g, entry) = glide_fixture();
+    let mut edit = NoteEdit::identity(1);
+    edit.glide_time_scale = 2.0;
+    let rendered = render(&frames, &segs, &[edit]);
+    assert_eq!(
+        rendered.len(),
+        frames.len() + g,
+        "glide doubles, core unchanged"
+    );
+    let last_glide = hz_to_cents(rendered[a_len + 2 * g - 1].fo);
+    assert!(
+        (last_glide - entry).abs() < 80.0,
+        "stretched glide should still land near entry, got {last_glide} vs {entry}"
+    );
+}
+
+#[test]
+fn render_glide_time_scale_zero_drops_glide() {
+    let (frames, segs, a_len, g, entry) = glide_fixture();
+    let mut edit = NoteEdit::identity(1);
+    edit.glide_time_scale = 0.0;
+    let rendered = render(&frames, &segs, &[edit]);
+    assert_eq!(
+        rendered.len(),
+        frames.len() - g,
+        "note shortens by glide_len"
+    );
+    let first = hz_to_cents(rendered[a_len].fo);
+    assert!(
+        (first - entry).abs() < 1e-9,
+        "note now starts at entry pitch, got {first} vs {entry}"
+    );
+}
+
+#[test]
+fn render_glide_survives_time_stretch() {
+    let (frames, segs, a_len, g, _) = glide_fixture();
+    let src_len = segs[1].frames.len();
+    let mut edit = NoteEdit::identity(1);
+    edit.out_len = Some(2 * src_len);
+    let rendered = render(&frames, &segs, &[edit]);
+    assert_eq!(rendered.len(), a_len + 2 * src_len);
+    // Continuity through the stretched glide: half the per-frame slope.
+    let depth = 702.0;
+    let max_step = depth / (2 * g) as f64 * 3.0 + 1.0;
+    for i in a_len..a_len + 2 * g {
+        let step = hz_to_cents(rendered[i].fo) - hz_to_cents(rendered[i - 1].fo);
+        assert!(
+            step.abs() < max_step,
+            "jump of {step} cents at frame {i} (max {max_step})"
+        );
+    }
+}
+
+#[test]
+fn render_glide_connects_two_edited_notes() {
+    let (frames, segs, a_len, g, old_entry) = glide_fixture();
+    let mut edit_a = NoteEdit::identity(0);
+    edit_a.target_cents = Some(match &segs[0].kind {
+        SegmentKind::Note(nc) => nc.center_cents - 100.0,
+        _ => unreachable!(),
+    });
+    let mut edit_b = NoteEdit::identity(1);
+    edit_b.target_cents = Some(match &segs[1].kind {
+        SegmentKind::Note(nc) => nc.center_cents + 100.0,
+        _ => unreachable!(),
+    });
+    let rendered = render(&frames, &segs, &[edit_a, edit_b]);
+
+    let exit = hz_to_cents(rendered[a_len - 1].fo);
+    let entry = hz_to_cents(rendered[a_len + g].fo);
+    assert!(
+        (entry - (old_entry + 100.0)).abs() < 1e-6,
+        "entry should follow note B's edit"
+    );
+    let first_glide = hz_to_cents(rendered[a_len].fo);
+    assert!(
+        (first_glide - exit).abs() < 80.0,
+        "glide should start from note A's edited exit: {first_glide} vs {exit}"
+    );
+}
+
 // --- render tests ---
 
 #[test]
