@@ -133,6 +133,27 @@ impl Xorshift {
             s: [123456789, 362436069, 521288629, 88675123],
         }
     }
+    /// Seed from a single `u32`, splitmix-style, so distinct seeds decorrelate
+    /// immediately rather than only after the state has mixed for a while.
+    /// Every word is forced nonzero: an all-zero state is a fixed point.
+    fn from_seed(seed: u32) -> Self {
+        let mix = |x: u32| -> u32 {
+            let mut z = x;
+            z ^= z >> 16;
+            z = z.wrapping_mul(0x85eb_ca6b);
+            z ^= z >> 13;
+            z = z.wrapping_mul(0xc2b2_ae35);
+            z ^= z >> 16;
+            z
+        };
+        let s = [
+            mix(seed ^ 0x9e37_79b9).max(1),
+            mix(seed ^ 0x1234_5678).max(1),
+            mix(seed ^ 0xdead_beef).max(1),
+            mix(seed ^ 0x2545_f491).max(1),
+        ];
+        Xorshift { s }
+    }
     /// Uniform random in [0, 1].
     fn uniform(&mut self) -> f64 {
         let t = self.s[3];
@@ -2401,6 +2422,19 @@ impl Synthesizer {
         Synthesizer::new(fs, 5.0, default_fftsize(fs, fo_floor), fo_floor, 800.0)
     }
 
+    /// Reseed the velvet-noise (aperiodic excitation) generator and reset its
+    /// pulse-timing state to a fresh start, as at construction. `Synthesizer`
+    /// defaults to a fixed seed (needed for bit-matching the reference
+    /// implementation in tests); callers running multiple concurrent voices
+    /// should give each instance a distinct seed here, or their noise streams
+    /// stay identical for as long as the instances process the same number of
+    /// samples -- audible as phasing/comb-filtering when voices overlap.
+    pub fn set_noise_seed(&mut self, seed: u32) {
+        self.syn.random = Xorshift::from_seed(seed);
+        self.syn.noise_int = 0;
+        self.syn.interval_random = 0;
+    }
+
     /// Supply the next frame's parameters (call once per frame boundary).
     /// `aperiodicity` and `spectral_envelope` must each be `numbins` long.
     /// Allocation-free.
@@ -3090,6 +3124,28 @@ mod tests {
         for _ in 0..2048 {
             assert_eq!(a.next_sample(), b.next_sample());
         }
+    }
+
+    #[test]
+    fn distinct_noise_seeds_decorrelate_velvet_noise() {
+        let fs = 24000.0;
+        let numbins = default_fftsize(fs, 71.0) / 2 + 1;
+        let ap = vec![1.0; numbins]; // fully aperiodic: output is pure velvet noise.
+        let sp: Vec<f64> = (0..numbins).map(|k| 1.0 / (1.0 + k as f64)).collect();
+
+        let render = |seed: Option<u32>| {
+            let mut synth = Synthesizer::with_defaults(fs);
+            if let Some(seed) = seed {
+                synth.set_noise_seed(seed);
+            }
+            synth.push_frame(220.0, true, false, &ap, &sp);
+            (0..2048).map(|_| synth.next_sample()).collect::<Vec<f64>>()
+        };
+
+        // Two fresh instances default to the same fixed seed: identical noise.
+        assert_eq!(render(None), render(None));
+        // Distinct seeds must decorrelate the noise stream.
+        assert_ne!(render(Some(1)), render(Some(2)));
     }
 
     #[test]
