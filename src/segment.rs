@@ -712,8 +712,6 @@ pub struct NoteEdit {
     pub drift_scale: f64,
     pub vibrato_scale: f64,
     pub vibrato_rate_scale: f64,
-    /// 1.0 = original glide curve, 0.0 = hard step (duration unchanged).
-    pub glide_scale: f64,
     /// Scales glide duration; 0.0 drops the glide frames (note shortens).
     pub glide_time_scale: f64,
     pub out_len: Option<usize>,
@@ -727,7 +725,6 @@ impl NoteEdit {
             drift_scale: 1.0,
             vibrato_scale: 1.0,
             vibrato_rate_scale: 1.0,
-            glide_scale: 1.0,
             glide_time_scale: 1.0,
             out_len: None,
         }
@@ -850,7 +847,6 @@ pub fn render(frames: &[Frame], segments: &[Segment], edits: &[NoteEdit]) -> Vec
                     for j in 0..glide_out {
                         let s = src_pos(j, glide_len, glide_out);
                         let shape = lerp_track(&nc.onset_glide, s);
-                        let shape = (1.0 - edit.glide_scale) + edit.glide_scale * shape;
                         let cents = start_cents + shape * (entry_cents - start_cents);
                         let idx = (s.floor() as usize).min(glide_len - 1);
                         let idx1 = (idx + 1).min(glide_len - 1);

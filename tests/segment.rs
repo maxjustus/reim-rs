@@ -744,22 +744,6 @@ fn render_glide_retargets_after_pitch_edit() {
 }
 
 #[test]
-fn render_glide_scale_zero_is_hard_step() {
-    let (frames, segs, a_len, g, entry) = glide_fixture();
-    let mut edit = NoteEdit::identity(1);
-    edit.glide_scale = 0.0;
-    let rendered = render(&frames, &segs, &[edit]);
-    assert_eq!(rendered.len(), frames.len(), "duration unchanged");
-    for (i, f) in rendered.iter().enumerate().take(a_len + g).skip(a_len) {
-        let c = hz_to_cents(f.fo);
-        assert!(
-            (c - entry).abs() < 1e-9,
-            "glide frame {i} at {c}, expected entry pitch {entry}"
-        );
-    }
-}
-
-#[test]
 fn render_glide_time_scale_stretches_glide() {
     let (frames, segs, a_len, g, entry) = glide_fixture();
     let mut edit = NoteEdit::identity(1);
