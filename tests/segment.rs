@@ -1,6 +1,6 @@
 use reim::segment::{
-    clean_contour, contour_svg, decompose_contour, render, segment, NoteEdit, SegmentConfig,
-    SegmentKind,
+    cents_to_hz, clean_contour, contour_svg, decompose_contour, hz_to_cents, render, segment,
+    NoteEdit, SegmentConfig, SegmentKind,
 };
 use reim::{write_wav, Analyzer, Frame, Reim, Synthesizer, WavData};
 use rustfft::FftPlanner;
@@ -456,6 +456,164 @@ fn contour_svg_structural() {
         svg.contains("polyline") || svg.contains("line"),
         "should have contour lines"
     );
+}
+
+// --- glide detection tests ---
+
+fn voiced_frame(fo: f64) -> Frame {
+    Frame {
+        fo,
+        voiced: true,
+        silence: false,
+        aperiodicity: vec![0.1; 10],
+        spectral_envelope: vec![1.0; 10],
+    }
+}
+
+/// Hold at f_a, cosine-eased cents ramp over `glide` frames, hold at f_b.
+fn glide_input(f_a: f64, f_b: f64, hold: usize, glide: usize) -> Vec<Frame> {
+    let ca = hz_to_cents(f_a);
+    let cb = hz_to_cents(f_b);
+    let pi = std::f64::consts::PI;
+    let mut v = Vec::new();
+    for _ in 0..hold {
+        v.push(voiced_frame(f_a));
+    }
+    for j in 0..glide {
+        let x = (j + 1) as f64 / (glide + 1) as f64;
+        let c = ca + (cb - ca) * 0.5 * (1.0 - (pi * x).cos());
+        v.push(voiced_frame(cents_to_hz(c)));
+    }
+    for _ in 0..hold {
+        v.push(voiced_frame(f_b));
+    }
+    v
+}
+
+fn note_contours(segs: &[reim::segment::Segment]) -> Vec<&reim::segment::NoteContour> {
+    segs.iter()
+        .filter_map(|s| match &s.kind {
+            SegmentKind::Note(nc) => Some(nc),
+            SegmentKind::Unvoiced => None,
+        })
+        .collect()
+}
+
+#[test]
+fn glide_detected_between_notes() {
+    let frames = glide_input(200.0, 300.0, 60, 20);
+    let segs = segment(&frames, FRAME_RATE, &SegmentConfig::default());
+    let notes = note_contours(&segs);
+    assert_eq!(notes.len(), 2, "expected 2 notes, got {}", notes.len());
+    assert!(notes[0].onset_glide.is_empty(), "first note has no glide");
+    let g = notes[1].onset_glide.len();
+    assert!((12..=24).contains(&g), "glide len {g}, expected ~20");
+    let depth = notes[1].onset_glide_depth_cents;
+    assert!(
+        (depth - 702.0).abs() < 100.0,
+        "depth {depth}, expected ~702 cents"
+    );
+    // First note ends where the glide starts: its last frame is still near 200 Hz.
+    let a_end = segs[0].frames.end;
+    let last_cents = hz_to_cents(frames[a_end - 1].fo) - hz_to_cents(200.0);
+    assert!(
+        last_cents.abs() < 60.0,
+        "first note's last frame {last_cents} cents from 200 Hz"
+    );
+}
+
+#[test]
+fn hard_step_has_no_glide() {
+    let frames = glide_input(200.0, 300.0, 60, 0);
+    let segs = segment(&frames, FRAME_RATE, &SegmentConfig::default());
+    let notes = note_contours(&segs);
+    assert_eq!(notes.len(), 2);
+    for nc in &notes {
+        assert!(nc.onset_glide.is_empty(), "hard step must not have a glide");
+    }
+}
+
+#[test]
+fn glide_with_vibrato_not_swallowed() {
+    // 6 Hz, 40-cent vibrato on both notes, 20-frame glide between them.
+    let pi = std::f64::consts::PI;
+    let base = glide_input(200.0, 300.0, 150, 20);
+    let frames: Vec<Frame> = base
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let t = i as f64 / FRAME_RATE;
+            let vib = 40.0 * (2.0 * pi * 6.0 * t).sin();
+            voiced_frame(f.fo * 2.0_f64.powf(vib / 1200.0))
+        })
+        .collect();
+    let segs = segment(&frames, FRAME_RATE, &SegmentConfig::default());
+    let notes = note_contours(&segs);
+    assert_eq!(notes.len(), 2, "expected 2 notes, got {}", notes.len());
+    let g = notes[1].onset_glide.len();
+    assert!(
+        (8..=40).contains(&g),
+        "glide len {g}: must not swallow vibrato cycles (true len 20)"
+    );
+    // Vibrato survives in the second note's core decomposition.
+    let nc = notes[1];
+    let mean_amp: f64 = nc.vibrato_amp.iter().sum::<f64>() / nc.vibrato_amp.len() as f64;
+    assert!(
+        (mean_amp - 40.0).abs() < 20.0,
+        "vibrato amp mean {mean_amp}, expected ~40"
+    );
+    // Regression guard: excluding glide frames from decomposition keeps residual small.
+    let res_rms =
+        (nc.residual.iter().map(|r| r * r).sum::<f64>() / nc.residual.len() as f64).sqrt();
+    assert!(
+        res_rms < 15.0,
+        "residual RMS {res_rms}, expected < 15 cents"
+    );
+}
+
+#[test]
+fn shallow_step_no_glide() {
+    // 25-cent step: below glide_min_cents (and below note-split threshold).
+    let f_b = 200.0 * 2.0_f64.powf(25.0 / 1200.0);
+    let frames = glide_input(200.0, f_b, 60, 10);
+    let segs = segment(&frames, FRAME_RATE, &SegmentConfig::default());
+    for nc in note_contours(&segs) {
+        assert!(
+            nc.onset_glide.is_empty(),
+            "25-cent move must not be a glide"
+        );
+    }
+}
+
+#[test]
+fn long_glide_capped() {
+    // 500 ms glide (100 frames) gets capped at max_glide_frames.
+    let config = SegmentConfig::default();
+    let frames = glide_input(200.0, 300.0, 60, 100);
+    let segs = segment(&frames, FRAME_RATE, &config);
+    let notes = note_contours(&segs);
+    let max_glide = notes.iter().map(|nc| nc.onset_glide.len()).max().unwrap();
+    assert!(
+        max_glide <= config.max_glide_frames,
+        "glide {max_glide} exceeds cap {}",
+        config.max_glide_frames
+    );
+    assert!(
+        max_glide >= config.max_glide_frames / 2,
+        "glide {max_glide}: long portamento should still be substantially detected"
+    );
+}
+
+#[test]
+fn render_identity_with_glide() {
+    let frames = glide_input(200.0, 300.0, 60, 20);
+    let segs = segment(&frames, FRAME_RATE, &SegmentConfig::default());
+    let rendered = render(&frames, &segs, &[]);
+    assert_eq!(rendered.len(), frames.len());
+    for (i, (orig, rend)) in frames.iter().zip(rendered.iter()).enumerate() {
+        let err = (hz_to_cents(orig.fo) - hz_to_cents(rend.fo)).abs();
+        assert!(err < 1e-6, "frame {i}: {err} cents off under identity");
+    }
 }
 
 // --- render tests ---

@@ -212,6 +212,22 @@ fn hilbert_analytic(signal: &[f64], planner: &mut FftPlanner<f64>) -> Vec<Comple
     buf
 }
 
+/// A sustained, mostly-monotone pitch movement — a stair-step chunk the note
+/// boundary detector carves out of a portamento. Vibrato fails the monotone
+/// test (net movement ~0 over a chunk), genuine short notes fail the slope test.
+fn is_transition(cents: &[f64], per_frame_slope_th: f64) -> bool {
+    if cents.len() < 2 {
+        return false;
+    }
+    let net = cents[cents.len() - 1] - cents[0];
+    let mean_slope = net.abs() / (cents.len() - 1) as f64;
+    if mean_slope < per_frame_slope_th {
+        return false;
+    }
+    let sum_abs: f64 = cents.windows(2).map(|w| (w[1] - w[0]).abs()).sum();
+    net.abs() / sum_abs.max(1e-12) >= 0.8
+}
+
 fn unwrap_phase(phase: &mut [f64]) {
     for i in 1..phase.len() {
         let mut diff = phase[i] - phase[i - 1];
@@ -337,6 +353,127 @@ pub fn decompose_contour(
         vibrato_phase,
         residual,
     }
+}
+
+/// Fold stair-stepped transition chunks into the following range, then refine
+/// each note boundary into (range, onset_glide_len) pairs by expanding along
+/// steep monotone slopes. Ranges stay contiguous; a glide's frames belong to
+/// the following note.
+fn attach_glides(
+    mut merged: Vec<Range<usize>>,
+    cleaned: &[f64],
+    run_end: usize,
+    frame_rate_hz: f64,
+    config: &SegmentConfig,
+) -> Vec<(Range<usize>, usize)> {
+    let cents_at = |j: usize| hz_to_cents(cleaned[j]);
+    let th = config.glide_slope_cents_per_sec / frame_rate_hz;
+
+    // Phase 0: vibrato near the stability threshold chops one note into
+    // half-cycle chunks (the running center gets seeded from a vibrato
+    // extreme). Re-merge adjacent ranges whose union still reads as one
+    // stable note; distinct notes fail because their union is bimodal.
+    let mut k = 0;
+    while k + 1 < merged.len() {
+        let a_vals: Vec<f64> = (merged[k].start..merged[k].end).map(cents_at).collect();
+        let b_vals: Vec<f64> = (merged[k + 1].start..merged[k + 1].end)
+            .map(cents_at)
+            .collect();
+        let union: Vec<f64> = (merged[k].start..merged[k + 1].end).map(cents_at).collect();
+        let m = median_cents(&union);
+        let within = union
+            .iter()
+            .filter(|&&c| (c - m).abs() < config.stability_cents)
+            .count();
+        let one_note = within as f64 / union.len() as f64 >= 0.85
+            && (median_cents(&a_vals) - m).abs() < config.stability_cents
+            && (median_cents(&b_vals) - m).abs() < config.stability_cents;
+        if one_note {
+            merged[k].end = merged[k + 1].end;
+            merged.remove(k + 1);
+        } else {
+            k += 1;
+        }
+    }
+
+    // Phase 1: monotone transition chunks merge into the next stable range as
+    // its pre-attached glide (a slow portamento gets carved into several
+    // stair-step "notes" by the boundary detector; they are really one glide).
+    let mut ranges: Vec<(Range<usize>, usize)> = Vec::new();
+    let mut chain_start: Option<usize> = None;
+    for range in &merged {
+        let len = range.end - range.start;
+        let slice: Vec<f64> = (range.start..range.end).map(cents_at).collect();
+        if !ranges.is_empty() && len >= config.min_note_frames && is_transition(&slice, th) {
+            chain_start.get_or_insert(range.start);
+            continue;
+        }
+        match chain_start.take() {
+            Some(cs) if len >= config.min_note_frames => {
+                ranges.push((cs..range.end, range.start - cs));
+            }
+            Some(cs) => {
+                ranges.push((cs..range.start, 0));
+                ranges.push((range.clone(), 0));
+            }
+            None => ranges.push((range.clone(), 0)),
+        }
+    }
+    if let Some(cs) = chain_start {
+        ranges.push((cs..run_end, 0));
+    }
+
+    // Phase 2: refine the glide extent at each boundary between two notes.
+    for k in 1..ranges.len() {
+        let (a, _) = ranges[k - 1].clone();
+        let (b, pre) = ranges[k].clone();
+        let core_start = b.start + pre;
+        if a.end - a.start < config.min_note_frames || b.end - core_start < config.min_note_frames {
+            continue;
+        }
+
+        let a_cents: Vec<f64> = (a.start..a.end).map(cents_at).collect();
+        let b_cents: Vec<f64> = (core_start..b.end).map(cents_at).collect();
+        let c_a = median_cents(&a_cents);
+        let c_b = median_cents(&b_cents);
+        if (c_b - c_a).abs() < config.glide_min_cents {
+            ranges[k].1 = 0;
+            continue;
+        }
+        let dir = (c_b - c_a).signum();
+        let band = config.stability_cents / 2.0;
+
+        let mut g_start = b.start;
+        let mut g_end = core_start;
+        while g_start > a.start + config.min_note_frames
+            && g_end - g_start < config.max_glide_frames
+            && dir * (cents_at(g_start) - cents_at(g_start - 1)) >= th
+            && dir * (cents_at(g_start - 1) - c_a) > band
+        {
+            g_start -= 1;
+        }
+        while g_end < b.end - config.min_note_frames
+            && g_end - g_start < config.max_glide_frames
+            && dir * (cents_at(g_end + 1) - cents_at(g_end)) >= th
+            && dir * (c_b - cents_at(g_end)) > band
+        {
+            g_end += 1;
+        }
+        if g_end - g_start > config.max_glide_frames {
+            g_start = g_end - config.max_glide_frames;
+        }
+
+        let depth = dir * (cents_at(g_end) - cents_at(g_start - 1));
+        if g_end - g_start >= 2 && depth >= config.glide_min_cents {
+            ranges[k - 1].0.end = g_start;
+            ranges[k].0.start = g_start;
+            ranges[k].1 = g_end - g_start;
+        } else {
+            ranges[k].1 = 0;
+        }
+    }
+
+    ranges
 }
 
 pub fn segment(frames: &[Frame], frame_rate_hz: f64, config: &SegmentConfig) -> Vec<Segment> {
@@ -468,25 +605,39 @@ pub fn segment(frames: &[Frame], frame_rate_hz: f64, config: &SegmentConfig) -> 
             }
         }
 
-        for range in merged {
+        let ranges = attach_glides(merged, &cleaned, run.end, frame_rate_hz, config);
+
+        for (range, glide_len) in ranges {
             let len = range.end - range.start;
             if len < config.min_note_frames {
                 segments.push(Segment {
                     frames: range,
                     kind: SegmentKind::Unvoiced,
                 });
-            } else {
-                let fo_slice: Vec<f64> = (range.start..range.end).map(|j| frames[j].fo).collect();
-                segments.push(Segment {
-                    frames: range,
-                    kind: SegmentKind::Note(decompose_contour(
-                        &fo_slice,
-                        frame_rate_hz,
-                        config,
-                        &mut planner,
-                    )),
-                });
+                continue;
             }
+            let core_start = range.start + glide_len;
+            let fo_slice: Vec<f64> = (core_start..range.end).map(|j| frames[j].fo).collect();
+            let mut nc = decompose_contour(&fo_slice, frame_rate_hz, config, &mut planner);
+            if glide_len > 0 {
+                let anchor_start = hz_to_cents(frames[range.start - 1].fo);
+                let anchor_end = hz_to_cents(frames[core_start].fo);
+                let depth = anchor_end - anchor_start;
+                nc.onset_glide = if depth.abs() < 1e-6 {
+                    (0..glide_len)
+                        .map(|j| j as f64 / glide_len as f64)
+                        .collect()
+                } else {
+                    (range.start..core_start)
+                        .map(|j| (hz_to_cents(frames[j].fo) - anchor_start) / depth)
+                        .collect()
+                };
+                nc.onset_glide_depth_cents = depth;
+            }
+            segments.push(Segment {
+                frames: range,
+                kind: SegmentKind::Note(nc),
+            });
         }
     }
 
@@ -531,8 +682,39 @@ fn lerp_track(track: &[f64], s: f64) -> f64 {
     track[idx] * (1.0 - t) + track[idx1] * t
 }
 
+/// Interpolate spectral data between two source frames; fo is supplied by the
+/// caller's contour model. Spectral envelope in log power, aperiodicity linear.
+fn interp_frame(fa: &Frame, fb: &Frame, t: f64, fo: f64) -> Frame {
+    let floor = 1e-16_f64;
+    let spectral_envelope: Vec<f64> = fa
+        .spectral_envelope
+        .iter()
+        .zip(fb.spectral_envelope.iter())
+        .map(|(&a, &b)| {
+            let la = a.max(floor).ln();
+            let lb = b.max(floor).ln();
+            (la * (1.0 - t) + lb * t).exp()
+        })
+        .collect();
+    let aperiodicity: Vec<f64> = fa
+        .aperiodicity
+        .iter()
+        .zip(fb.aperiodicity.iter())
+        .map(|(&a, &b)| a * (1.0 - t) + b * t)
+        .collect();
+    let nearest = if t < 0.5 { fa } else { fb };
+    Frame {
+        fo,
+        voiced: nearest.voiced,
+        silence: nearest.silence,
+        aperiodicity,
+        spectral_envelope,
+    }
+}
+
 pub fn render(frames: &[Frame], segments: &[Segment], edits: &[NoteEdit]) -> Vec<Frame> {
     let mut output = Vec::new();
+    let mut last_voiced_exit_cents: Option<f64> = None;
 
     for (seg_idx, seg) in segments.iter().enumerate() {
         let edit = edits.iter().find(|e| e.segment_index == seg_idx);
@@ -540,6 +722,7 @@ pub fn render(frames: &[Frame], segments: &[Segment], edits: &[NoteEdit]) -> Vec
 
         match &seg.kind {
             SegmentKind::Unvoiced => {
+                last_voiced_exit_cents = None;
                 let out_len = edit.and_then(|e| e.out_len).unwrap_or(src_len);
                 for j in 0..out_len {
                     let s = if out_len <= 1 {
@@ -561,56 +744,71 @@ pub fn render(frames: &[Frame], segments: &[Segment], edits: &[NoteEdit]) -> Vec
                         &identity
                     }
                 };
-                let out_len = edit.out_len.unwrap_or(src_len);
-                if out_len == 0 {
-                    continue;
+                let glide_len = nc.onset_glide.len();
+                let core_len = src_len - glide_len;
+                let (glide_out, core_out) = match edit.out_len {
+                    Some(0) => continue,
+                    Some(x) => {
+                        let stretch = x as f64 / src_len as f64;
+                        let g = ((glide_len as f64 * edit.glide_time_scale * stretch).round()
+                            as usize)
+                            .min(x - 1);
+                        (g, x - g)
+                    }
+                    None => (
+                        (glide_len as f64 * edit.glide_time_scale).round() as usize,
+                        core_len,
+                    ),
+                };
+
+                let center = edit.target_cents.unwrap_or(nc.center_cents);
+                let entry_cents = center
+                    + edit.drift_scale * lerp_track(&nc.drift, 0.0)
+                    + edit.vibrato_scale
+                        * lerp_track(&nc.vibrato_amp, 0.0)
+                        * lerp_track(&nc.vibrato_phase, 0.0).sin()
+                    + edit.drift_scale * lerp_track(&nc.residual, 0.0);
+
+                if glide_len > 0 && glide_out > 0 {
+                    // Retarget: connect the previous note's actual exit pitch
+                    // to this note's (post-edit) entry pitch along the stored
+                    // normalized glide shape.
+                    let start_cents =
+                        last_voiced_exit_cents.unwrap_or(entry_cents - nc.onset_glide_depth_cents);
+                    for j in 0..glide_out {
+                        let s = if glide_out <= 1 {
+                            0.0
+                        } else {
+                            j as f64 * (glide_len - 1) as f64 / (glide_out - 1) as f64
+                        };
+                        let shape = lerp_track(&nc.onset_glide, s);
+                        let shape = (1.0 - edit.glide_scale) + edit.glide_scale * shape;
+                        let cents = start_cents + shape * (entry_cents - start_cents);
+                        let idx = (s.floor() as usize).min(glide_len - 1);
+                        let idx1 = (idx + 1).min(glide_len - 1);
+                        output.push(interp_frame(
+                            &frames[seg.frames.start + idx],
+                            &frames[seg.frames.start + idx1],
+                            s - s.floor(),
+                            cents_to_hz(cents),
+                        ));
+                    }
                 }
 
+                let core_origin = seg.frames.start + glide_len;
                 let mut phi = lerp_track(&nc.vibrato_phase, 0.0);
-                let mut prev_s_phase = lerp_track(&nc.vibrato_phase, 0.0);
+                let mut prev_s_phase = phi;
+                let mut last_cents = entry_cents;
 
-                for j in 0..out_len {
-                    let s = if out_len <= 1 {
+                for j in 0..core_out {
+                    let s = if core_out <= 1 {
                         0.0
                     } else {
-                        j as f64 * (src_len - 1) as f64 / (out_len - 1) as f64
+                        j as f64 * (core_len - 1) as f64 / (core_out - 1) as f64
                     };
-                    let idx = (s.floor() as usize).min(src_len - 1);
-                    let idx1 = (idx + 1).min(src_len - 1);
-                    let t = s - s.floor();
-                    let abs_idx = seg.frames.start + idx;
-                    let abs_idx1 = seg.frames.start + idx1;
+                    let idx = (s.floor() as usize).min(core_len - 1);
+                    let idx1 = (idx + 1).min(core_len - 1);
 
-                    let fa = &frames[abs_idx];
-                    let fb = &frames[abs_idx1];
-
-                    // Spectral envelope: log-power interpolation
-                    let floor = 1e-16_f64;
-                    let spectral_envelope: Vec<f64> = fa
-                        .spectral_envelope
-                        .iter()
-                        .zip(fb.spectral_envelope.iter())
-                        .map(|(&a, &b)| {
-                            let la = a.max(floor).ln();
-                            let lb = b.max(floor).ln();
-                            (la * (1.0 - t) + lb * t).exp()
-                        })
-                        .collect();
-
-                    // Aperiodicity: linear interpolation
-                    let aperiodicity: Vec<f64> = fa
-                        .aperiodicity
-                        .iter()
-                        .zip(fb.aperiodicity.iter())
-                        .map(|(&a, &b)| a * (1.0 - t) + b * t)
-                        .collect();
-
-                    // Voiced/silence: nearest
-                    let nearest = if t < 0.5 { fa } else { fb };
-                    let voiced = nearest.voiced;
-                    let silence = nearest.silence;
-
-                    // Reconstruct fo from contour model
                     let cur_phase = lerp_track(&nc.vibrato_phase, s);
                     if j == 0 {
                         phi = cur_phase;
@@ -623,21 +821,21 @@ pub fn render(frames: &[Frame], segments: &[Segment], edits: &[NoteEdit]) -> Vec
                     let vib_amp = lerp_track(&nc.vibrato_amp, s);
                     let residual = lerp_track(&nc.residual, s);
 
-                    let center = edit.target_cents.unwrap_or(nc.center_cents);
                     let cents_out = center
                         + edit.drift_scale * drift
                         + edit.vibrato_scale * vib_amp * phi.sin()
                         + edit.drift_scale * residual;
-                    let fo = cents_to_hz(cents_out);
+                    last_cents = cents_out;
 
-                    output.push(Frame {
-                        fo,
-                        voiced,
-                        silence,
-                        aperiodicity,
-                        spectral_envelope,
-                    });
+                    output.push(interp_frame(
+                        &frames[core_origin + idx],
+                        &frames[core_origin + idx1],
+                        s - s.floor(),
+                        cents_to_hz(cents_out),
+                    ));
                 }
+
+                last_voiced_exit_cents = Some(last_cents);
             }
         }
     }
@@ -798,8 +996,9 @@ pub fn contour_svg(
         let SegmentKind::Note(ref nc) = seg.kind else {
             continue;
         };
-        let t0 = seg.frames.start as f64 / frame_rate_hz;
-        let t1 = seg.frames.end.saturating_sub(1).max(seg.frames.start) as f64 / frame_rate_hz;
+        let core_start = seg.frames.start + nc.onset_glide.len();
+        let t0 = core_start as f64 / frame_rate_hz;
+        let t1 = seg.frames.end.saturating_sub(1).max(core_start) as f64 / frame_rate_hz;
 
         // 4. Center line (green)
         let yc = py(nc.center_cents);
@@ -817,7 +1016,7 @@ pub fn contour_svg(
             let _ = write!(
                 pts,
                 "{:.1},{:.1} ",
-                px((seg.frames.start + j) as f64 / frame_rate_hz),
+                px((core_start + j) as f64 / frame_rate_hz),
                 py(nc.center_cents + d)
             );
         }
@@ -834,7 +1033,7 @@ pub fn contour_svg(
             let _ = write!(
                 pts,
                 "{:.1},{:.1} ",
-                px((seg.frames.start + j) as f64 / frame_rate_hz),
+                px((core_start + j) as f64 / frame_rate_hz),
                 py(c)
             );
         }
