@@ -616,6 +616,17 @@ fn render_identity_with_glide() {
     }
 }
 
+#[test]
+fn contour_svg_draws_glide() {
+    let frames = glide_input(200.0, 300.0, 60, 20);
+    let segs = segment(&frames, FRAME_RATE, &SegmentConfig::default());
+    let svg = contour_svg(&frames, &segs, FRAME_RATE, None);
+    assert!(
+        svg.contains("#d2a"),
+        "SVG should contain the magenta glide polyline"
+    );
+}
+
 // --- scoop-from-silence tests ---
 
 /// 20 unvoiced frames, a 15-frame linear rise from 150 cents below the

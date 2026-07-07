@@ -401,8 +401,8 @@ fn cmd_segment(input: &str, svg_output: Option<&str>) -> Result<(), String> {
 
     println!("segments: {}", segments.len());
     println!(
-        "{:<8} {:<8} {:<8} {:<12} {:<10} {:<8} {:<8} {:<8} {:<8}",
-        "start", "end", "type", "center", "vib_rate", "vib_amp", "drift%", "vib%", "res%"
+        "{:<8} {:<8} {:<8} {:<12} {:<12} {:<10} {:<8} {:<8} {:<8} {:<8}",
+        "start", "end", "type", "center", "glide", "vib_rate", "vib_amp", "drift%", "vib%", "res%"
     );
 
     for seg in &segments {
@@ -425,12 +425,22 @@ fn cmd_segment(input: &str, svg_output: Option<&str>) -> Result<(), String> {
                 let oct = midi_round / 12 - 1;
                 let cents_off = c.center_cents - (midi_round as f64 - 69.0) * 100.0;
                 let note_str = format!("{}{}{:+.0}c", names[note as usize], oct, cents_off);
+                let glide_str = if c.onset_glide.is_empty() {
+                    "-".to_string()
+                } else {
+                    format!(
+                        "{:.0}ms/{:+.0}c",
+                        c.onset_glide.len() as f64 * period_ms,
+                        c.onset_glide_depth_cents
+                    )
+                };
                 println!(
-                    "{:<8.0} {:<8.0} {:<8} {:<12} {:<10.1} {:<8.1} {:<8.0} {:<8.0} {:<8.0}",
+                    "{:<8.0} {:<8.0} {:<8} {:<12} {:<12} {:<10.1} {:<8.1} {:<8.0} {:<8.0} {:<8.0}",
                     start_ms,
                     end_ms,
                     "Note",
                     note_str,
+                    glide_str,
                     c.vibrato_rate_hz,
                     mean_amp,
                     d_frac * 100.0,
@@ -440,8 +450,8 @@ fn cmd_segment(input: &str, svg_output: Option<&str>) -> Result<(), String> {
             }
             reim::segment::SegmentKind::Unvoiced => {
                 println!(
-                    "{:<8.0} {:<8.0} {:<8} {:<12} {:<10} {:<8} {:<8} {:<8} {:<8}",
-                    start_ms, end_ms, "Unvoiced", "-", "-", "-", "-", "-", "-"
+                    "{:<8.0} {:<8.0} {:<8} {:<12} {:<12} {:<10} {:<8} {:<8} {:<8} {:<8}",
+                    start_ms, end_ms, "Unvoiced", "-", "-", "-", "-", "-", "-", "-"
                 );
             }
         }

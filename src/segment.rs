@@ -1078,6 +1078,31 @@ pub fn contour_svg(
             "<polyline points=\"{}\" fill=\"none\" stroke=\"#d22\" stroke-width=\"1\"/>",
             pts.trim_end()
         );
+
+        // 6b. Onset glide reconstruction (magenta)
+        if !nc.onset_glide.is_empty() {
+            let anchor_end = nc.center_cents
+                + nc.drift.first().copied().unwrap_or(0.0)
+                + nc.vibrato_amp.first().copied().unwrap_or(0.0)
+                    * nc.vibrato_phase.first().copied().unwrap_or(0.0).sin()
+                + nc.residual.first().copied().unwrap_or(0.0);
+            let anchor_start = anchor_end - nc.onset_glide_depth_cents;
+            pts.clear();
+            for (j, sh) in nc.onset_glide.iter().enumerate() {
+                let c = anchor_start + sh * nc.onset_glide_depth_cents;
+                let _ = write!(
+                    pts,
+                    "{:.1},{:.1} ",
+                    px((seg.frames.start + j) as f64 / frame_rate_hz),
+                    py(c)
+                );
+            }
+            let _ = writeln!(
+                s,
+                "<polyline points=\"{}\" fill=\"none\" stroke=\"#d2a\" stroke-width=\"1.5\"/>",
+                pts.trim_end()
+            );
+        }
     }
 
     // 7. Overlay track (purple)
