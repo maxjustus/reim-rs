@@ -48,6 +48,9 @@ pub struct SegmentConfig {
     pub drift_cutoff_hz: f64,
     pub vibrato_min_hz: f64,
     pub vibrato_max_hz: f64,
+    pub glide_slope_cents_per_sec: f64,
+    pub glide_min_cents: f64,
+    pub max_glide_frames: usize,
 }
 
 impl Default for SegmentConfig {
@@ -59,12 +62,21 @@ impl Default for SegmentConfig {
             drift_cutoff_hz: 2.0,
             vibrato_min_hz: 4.0,
             vibrato_max_hz: 8.0,
+            glide_slope_cents_per_sec: 400.0,
+            glide_min_cents: 40.0,
+            max_glide_frames: 60,
         }
     }
 }
 
+/// The segment covers `onset_glide.len()` glide frames followed by the core;
+/// `drift`/`vibrato_*`/`residual` are core-only.
 pub struct NoteContour {
     pub center_cents: f64,
+    /// Normalized glide shape (~0 at the previous pitch, ~1 at this note's
+    /// entry pitch, may overshoot). Empty = no onset glide.
+    pub onset_glide: Vec<f64>,
+    pub onset_glide_depth_cents: f64,
     pub drift: Vec<f64>,
     pub vibrato_rate_hz: f64,
     pub vibrato_amp: Vec<f64>,
@@ -239,6 +251,8 @@ pub fn decompose_contour(
         let residual = detrended;
         return NoteContour {
             center_cents: center,
+            onset_glide: Vec::new(),
+            onset_glide_depth_cents: 0.0,
             drift,
             vibrato_rate_hz: 0.0,
             vibrato_amp: vec![0.0; n],
@@ -256,6 +270,8 @@ pub fn decompose_contour(
     if acorr[0] < 1e-10 {
         return NoteContour {
             center_cents: center,
+            onset_glide: Vec::new(),
+            onset_glide_depth_cents: 0.0,
             drift,
             vibrato_rate_hz: 0.0,
             vibrato_amp: vec![0.0; n],
@@ -281,6 +297,8 @@ pub fn decompose_contour(
         // No vibrato detected
         return NoteContour {
             center_cents: center,
+            onset_glide: Vec::new(),
+            onset_glide_depth_cents: 0.0,
             drift,
             vibrato_rate_hz: 0.0,
             vibrato_amp: vec![0.0; n],
@@ -311,6 +329,8 @@ pub fn decompose_contour(
 
     NoteContour {
         center_cents: center,
+        onset_glide: Vec::new(),
+        onset_glide_depth_cents: 0.0,
         drift,
         vibrato_rate_hz: vibrato_rate,
         vibrato_amp,
@@ -479,6 +499,10 @@ pub struct NoteEdit {
     pub drift_scale: f64,
     pub vibrato_scale: f64,
     pub vibrato_rate_scale: f64,
+    /// 1.0 = original glide curve, 0.0 = hard step (duration unchanged).
+    pub glide_scale: f64,
+    /// Scales glide duration; 0.0 drops the glide frames (note shortens).
+    pub glide_time_scale: f64,
     pub out_len: Option<usize>,
 }
 
@@ -490,6 +514,8 @@ impl NoteEdit {
             drift_scale: 1.0,
             vibrato_scale: 1.0,
             vibrato_rate_scale: 1.0,
+            glide_scale: 1.0,
+            glide_time_scale: 1.0,
             out_len: None,
         }
     }

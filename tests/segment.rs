@@ -510,6 +510,8 @@ fn render_pitch_correction() {
         drift_scale: 0.0,
         vibrato_scale: 1.0,
         vibrato_rate_scale: 1.0,
+        glide_scale: 1.0,
+        glide_time_scale: 1.0,
         out_len: None,
     }];
 
@@ -547,6 +549,8 @@ fn render_vibrato_removal() {
         drift_scale: 1.0,
         vibrato_scale: 0.0,
         vibrato_rate_scale: 1.0,
+        glide_scale: 1.0,
+        glide_time_scale: 1.0,
         out_len: None,
     }];
 
@@ -587,6 +591,8 @@ fn render_time_stretch() {
         drift_scale: 1.0,
         vibrato_scale: 1.0,
         vibrato_rate_scale: 1.0,
+        glide_scale: 1.0,
+        glide_time_scale: 1.0,
         out_len: Some(100),
     }];
 
@@ -689,6 +695,8 @@ fn e2e_pitch_correction() {
             drift_scale: 0.0,
             vibrato_scale: 1.0,
             vibrato_rate_scale: 1.0,
+            glide_scale: 1.0,
+            glide_time_scale: 1.0,
             out_len: None,
         })
         .collect();
@@ -728,6 +736,8 @@ fn e2e_vibrato_removal() {
             drift_scale: 1.0,
             vibrato_scale: 0.0,
             vibrato_rate_scale: 1.0,
+            glide_scale: 1.0,
+            glide_time_scale: 1.0,
             out_len: None,
         })
         .collect();
@@ -789,6 +799,8 @@ fn e2e_time_stretch() {
             drift_scale: 1.0,
             vibrato_scale: 1.0,
             vibrato_rate_scale: 1.0,
+            glide_scale: 1.0,
+            glide_time_scale: 1.0,
             out_len: Some(s.frames.len() * 2),
         })
         .collect();
@@ -935,6 +947,8 @@ fn write_pitch_correction() {
                     drift_scale: 0.0,
                     vibrato_scale: 1.0,
                     vibrato_rate_scale: 1.0,
+                    glide_scale: 1.0,
+                    glide_time_scale: 1.0,
                     out_len: None,
                 })
             } else {
@@ -983,6 +997,8 @@ fn write_vibrato_removal() {
             drift_scale: 1.0,
             vibrato_scale: 0.0,
             vibrato_rate_scale: 1.0,
+            glide_scale: 1.0,
+            glide_time_scale: 1.0,
             out_len: None,
         })
         .collect();
@@ -1028,6 +1044,8 @@ fn write_transpose() {
                     drift_scale: 1.0,
                     vibrato_scale: 1.0,
                     vibrato_rate_scale: 1.0,
+                    glide_scale: 1.0,
+                    glide_time_scale: 1.0,
                     out_len: None,
                 })
             } else {
@@ -1068,6 +1086,8 @@ fn write_time_stretch() {
             drift_scale: 1.0,
             vibrato_scale: 1.0,
             vibrato_rate_scale: 1.0,
+            glide_scale: 1.0,
+            glide_time_scale: 1.0,
             out_len: Some((s.frames.len() as f64 * 1.5) as usize),
         })
         .collect();
