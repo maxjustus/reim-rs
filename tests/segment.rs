@@ -616,6 +616,78 @@ fn render_identity_with_glide() {
     }
 }
 
+// --- scoop-from-silence tests ---
+
+/// 20 unvoiced frames, a 15-frame linear rise from 150 cents below the
+/// target into a 100-frame hold at 300 Hz.
+fn scoop_input() -> Vec<Frame> {
+    let mut frames: Vec<Frame> = (0..20)
+        .map(|_| Frame {
+            fo: 0.0,
+            voiced: false,
+            silence: true,
+            aperiodicity: vec![0.1; 10],
+            spectral_envelope: vec![1.0; 10],
+        })
+        .collect();
+    let tc = hz_to_cents(300.0);
+    for j in 0..15 {
+        let c = tc - 150.0 * (1.0 - (j as f64 + 1.0) / 16.0);
+        frames.push(voiced_frame(cents_to_hz(c)));
+    }
+    for _ in 0..100 {
+        frames.push(voiced_frame(300.0));
+    }
+    frames
+}
+
+#[test]
+fn scoop_from_silence_detected() {
+    let frames = scoop_input();
+    let segs = segment(&frames, FRAME_RATE, &SegmentConfig::default());
+    let notes = note_contours(&segs);
+    assert_eq!(notes.len(), 1, "expected 1 note, got {}", notes.len());
+    let nc = notes[0];
+    let g = nc.onset_glide.len();
+    assert!((8..=20).contains(&g), "scoop len {g}, expected ~13");
+    assert!(
+        (nc.onset_glide_depth_cents - 150.0).abs() < 50.0,
+        "scoop depth {}, expected ~150 cents",
+        nc.onset_glide_depth_cents
+    );
+}
+
+#[test]
+fn scoop_depth_preserved_under_pitch_edit() {
+    let frames = scoop_input();
+    let segs = segment(&frames, FRAME_RATE, &SegmentConfig::default());
+    let (note_idx, nc) = segs
+        .iter()
+        .enumerate()
+        .find_map(|(i, s)| match &s.kind {
+            SegmentKind::Note(nc) => Some((i, nc)),
+            SegmentKind::Unvoiced => None,
+        })
+        .unwrap();
+    let g = nc.onset_glide.len();
+    assert!(g >= 2, "fixture must produce a scoop");
+    let note_start = segs[note_idx].frames.start;
+    let old_entry = hz_to_cents(frames[note_start + g].fo);
+
+    let mut edit = NoteEdit::identity(note_idx);
+    edit.target_cents = Some(nc.center_cents + 300.0);
+    let rendered = render(&frames, &segs, &[edit]);
+
+    // With no previous voiced pitch, the scoop shifts with the note,
+    // preserving its depth below the (edited) entry pitch.
+    let first = hz_to_cents(rendered[note_start].fo);
+    let expected = old_entry + 300.0 - nc.onset_glide_depth_cents;
+    assert!(
+        (first - expected).abs() < 1e-6,
+        "scoop start {first}, expected {expected}"
+    );
+}
+
 // --- glide edit tests ---
 
 /// (frames, segments, a_len, glide_len, entry_cents) for the standard
@@ -669,8 +741,8 @@ fn render_glide_scale_zero_is_hard_step() {
     edit.glide_scale = 0.0;
     let rendered = render(&frames, &segs, &[edit]);
     assert_eq!(rendered.len(), frames.len(), "duration unchanged");
-    for i in a_len..a_len + g {
-        let c = hz_to_cents(rendered[i].fo);
+    for (i, f) in rendered.iter().enumerate().take(a_len + g).skip(a_len) {
+        let c = hz_to_cents(f.fo);
         assert!(
             (c - entry).abs() < 1e-9,
             "glide frame {i} at {c}, expected entry pitch {entry}"

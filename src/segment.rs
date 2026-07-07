@@ -404,7 +404,7 @@ fn attach_glides(
     for range in &merged {
         let len = range.end - range.start;
         let slice: Vec<f64> = (range.start..range.end).map(cents_at).collect();
-        if !ranges.is_empty() && len >= config.min_note_frames && is_transition(&slice, th) {
+        if len >= config.min_note_frames && is_transition(&slice, th) {
             chain_start.get_or_insert(range.start);
             continue;
         }
@@ -423,16 +423,46 @@ fn attach_glides(
         ranges.push((cs..run_end, 0));
     }
 
+    // Scoop: a glide out of silence at the run start. The glide's own first
+    // frame anchors the depth; there is no previous note to expand into.
+    if let Some((b, pre)) = ranges.first().cloned() {
+        let core_start = b.start + pre;
+        if b.end - core_start >= config.min_note_frames {
+            let b_cents: Vec<f64> = (core_start..b.end).map(cents_at).collect();
+            let c_b = median_cents(&b_cents);
+            let dir = (c_b - cents_at(b.start)).signum();
+            let band = config.stability_cents / 2.0;
+            let g_start = b.start;
+            let mut g_end = core_start;
+            while g_end < b.end - config.min_note_frames
+                && g_end - g_start < config.max_glide_frames
+                && dir * (cents_at(g_end + 1) - cents_at(g_end)) >= th
+                && dir * (c_b - cents_at(g_end)) > band
+            {
+                g_end += 1;
+            }
+            let depth = dir * (cents_at(g_end) - cents_at(g_start));
+            ranges[0].1 = if g_end - g_start >= 2 && depth >= config.glide_min_cents {
+                g_end - g_start
+            } else {
+                0
+            };
+        }
+    }
+
     // Phase 2: refine the glide extent at each boundary between two notes.
     for k in 1..ranges.len() {
-        let (a, _) = ranges[k - 1].clone();
+        let (a, a_glide) = ranges[k - 1].clone();
         let (b, pre) = ranges[k].clone();
+        let a_core_start = a.start + a_glide;
         let core_start = b.start + pre;
-        if a.end - a.start < config.min_note_frames || b.end - core_start < config.min_note_frames {
+        if a.end - a_core_start < config.min_note_frames
+            || b.end - core_start < config.min_note_frames
+        {
             continue;
         }
 
-        let a_cents: Vec<f64> = (a.start..a.end).map(cents_at).collect();
+        let a_cents: Vec<f64> = (a_core_start..a.end).map(cents_at).collect();
         let b_cents: Vec<f64> = (core_start..b.end).map(cents_at).collect();
         let c_a = median_cents(&a_cents);
         let c_b = median_cents(&b_cents);
@@ -445,7 +475,7 @@ fn attach_glides(
 
         let mut g_start = b.start;
         let mut g_end = core_start;
-        while g_start > a.start + config.min_note_frames
+        while g_start > a_core_start + config.min_note_frames
             && g_end - g_start < config.max_glide_frames
             && dir * (cents_at(g_start) - cents_at(g_start - 1)) >= th
             && dir * (cents_at(g_start - 1) - c_a) > band
@@ -620,7 +650,13 @@ pub fn segment(frames: &[Frame], frame_rate_hz: f64, config: &SegmentConfig) -> 
             let fo_slice: Vec<f64> = (core_start..range.end).map(|j| frames[j].fo).collect();
             let mut nc = decompose_contour(&fo_slice, frame_rate_hz, config, &mut planner);
             if glide_len > 0 {
-                let anchor_start = hz_to_cents(frames[range.start - 1].fo);
+                // Scoop from silence anchors on its own first frame; a glide
+                // between notes anchors on the previous note's last frame.
+                let anchor_start = if range.start > 0 && frames[range.start - 1].voiced {
+                    hz_to_cents(frames[range.start - 1].fo)
+                } else {
+                    hz_to_cents(frames[range.start].fo)
+                };
                 let anchor_end = hz_to_cents(frames[core_start].fo);
                 let depth = anchor_end - anchor_start;
                 nc.onset_glide = if depth.abs() < 1e-6 {
