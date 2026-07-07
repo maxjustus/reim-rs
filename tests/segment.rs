@@ -883,6 +883,62 @@ fn segment_output_len_matches_render_span_glide_time_scale() {
 }
 
 #[test]
+fn render_lead_gap_inserts_silence() {
+    let (frames, segs, a_len, _g, _) = glide_fixture();
+    let edit = NoteEdit {
+        lead_gap_frames: 10,
+        ..NoteEdit::identity(1)
+    };
+    let rendered = render(&frames, &segs, std::slice::from_ref(&edit));
+    assert_eq!(rendered.len(), frames.len() + 10);
+    for (i, f) in rendered[a_len..a_len + 10].iter().enumerate() {
+        assert!(f.silence && !f.voiced, "gap frame {i} not silent");
+    }
+    // Content after the gap is unchanged relative to the no-gap render.
+    let baseline = render(&frames, &segs, &[]);
+    for (i, (a, b)) in baseline[a_len..].iter().zip(&rendered[a_len + 10..]).enumerate() {
+        assert_eq!(a.fo, b.fo, "fo mismatch at post-gap frame {i}");
+    }
+}
+
+#[test]
+fn render_lead_gap_breaks_glide_retarget() {
+    let (frames, segs, a_len, _g, entry) = glide_fixture();
+    let edit_a = NoteEdit {
+        target_cents: Some(note_contours(&segs)[0].center_cents + 300.0),
+        ..NoteEdit::identity(0)
+    };
+    let edit_b = NoteEdit {
+        lead_gap_frames: 10,
+        ..NoteEdit::identity(1)
+    };
+    let depth = note_contours(&segs)[1].onset_glide_depth_cents;
+    let rendered = render(&frames, &segs, &[edit_a, edit_b]);
+    // Gap severs the note from A: the glide anchors at entry - depth (scoop),
+    // not at A's edited exit pitch.
+    let glide_start = hz_to_cents(rendered[a_len + 10].fo);
+    assert!(
+        (glide_start - (entry - depth)).abs() < 80.0,
+        "glide start {glide_start}, expected near {}",
+        entry - depth
+    );
+}
+
+#[test]
+fn segment_output_len_includes_lead_gap() {
+    let (frames, segs, _a_len, _g, _) = glide_fixture();
+    let edit = NoteEdit {
+        lead_gap_frames: 10,
+        ..NoteEdit::identity(1)
+    };
+    let rendered = render(&frames, &segs, std::slice::from_ref(&edit));
+    let len_a = reim::segment::segment_output_len(&segs[0], None);
+    let len_b = reim::segment::segment_output_len(&segs[1], Some(&edit));
+    assert_eq!(len_b, segs[1].frames.len() + 10);
+    assert_eq!(len_a + len_b, rendered.len());
+}
+
+#[test]
 fn segment_output_len_dropped_segment_is_zero() {
     let (frames, segs, _a_len, _g, _) = glide_fixture();
     let edit = NoteEdit {

@@ -734,6 +734,10 @@ pub struct NoteEdit {
     /// Scales glide duration; 0.0 drops the glide frames (note shortens).
     pub glide_time_scale: f64,
     pub out_len: Option<usize>,
+    /// Silence frames rendered before the segment (repositioning gap). A gap
+    /// severs the note from its predecessor, so an onset glide anchors on its
+    /// own depth (scoop) instead of retargeting to the previous exit pitch.
+    pub lead_gap_frames: usize,
 }
 
 impl NoteEdit {
@@ -746,6 +750,7 @@ impl NoteEdit {
             vibrato_rate_scale: 1.0,
             glide_time_scale: 1.0,
             out_len: None,
+            lead_gap_frames: 0,
         }
     }
 }
@@ -844,7 +849,7 @@ pub fn segment_output_len(seg: &Segment, edit: Option<&NoteEdit>) -> usize {
             };
             let glide_len = nc.onset_glide.len();
             note_render_lengths(src_len, glide_len, edit)
-                .map(|(glide_out, core_out)| glide_out + core_out)
+                .map(|(glide_out, core_out)| edit.lead_gap_frames + glide_out + core_out)
                 .unwrap_or(0)
         }
     }
@@ -884,6 +889,17 @@ pub fn render(frames: &[Frame], segments: &[Segment], edits: &[NoteEdit]) -> Vec
                 else {
                     continue;
                 };
+
+                if edit.lead_gap_frames > 0 {
+                    let gap_frame = Frame {
+                        fo: 0.0,
+                        voiced: false,
+                        silence: true,
+                        ..frames[seg.frames.start].clone()
+                    };
+                    output.extend(std::iter::repeat_n(gap_frame, edit.lead_gap_frames));
+                    last_voiced_exit_cents = None;
+                }
 
                 let center = edit.target_cents.unwrap_or(nc.center_cents);
                 let entry_cents = center
