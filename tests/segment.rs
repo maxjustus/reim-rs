@@ -749,11 +749,8 @@ fn render_glide_time_scale_stretches_glide() {
     let mut edit = NoteEdit::identity(1);
     edit.glide_time_scale = 2.0;
     let rendered = render(&frames, &segs, &[edit]);
-    assert_eq!(
-        rendered.len(),
-        frames.len() + g,
-        "glide doubles, core unchanged"
-    );
+    // Timing-neutral: total length unchanged, glide grows and core compresses.
+    assert_eq!(rendered.len(), frames.len(), "total length unchanged");
     let last_glide = hz_to_cents(rendered[a_len + 2 * g - 1].fo);
     assert!(
         (last_glide - entry).abs() < 80.0,
@@ -762,20 +759,18 @@ fn render_glide_time_scale_stretches_glide() {
 }
 
 #[test]
-fn render_glide_time_scale_zero_drops_glide() {
-    let (frames, segs, a_len, g, entry) = glide_fixture();
+fn render_glide_time_scale_zero_is_hard_step() {
+    let (frames, segs, a_len, _g, entry) = glide_fixture();
     let mut edit = NoteEdit::identity(1);
     edit.glide_time_scale = 0.0;
     let rendered = render(&frames, &segs, &[edit]);
-    assert_eq!(
-        rendered.len(),
-        frames.len() - g,
-        "note shortens by glide_len"
-    );
+    // Timing-neutral hard step: no glide frames, length unchanged, note
+    // begins at the entry pitch.
+    assert_eq!(rendered.len(), frames.len(), "total length unchanged");
     let first = hz_to_cents(rendered[a_len].fo);
     assert!(
         (first - entry).abs() < 1e-9,
-        "note now starts at entry pitch, got {first} vs {entry}"
+        "note now starts at entry pitch (hard step), got {first} vs {entry}"
     );
 }
 

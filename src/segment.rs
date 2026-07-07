@@ -815,20 +815,19 @@ pub fn render(frames: &[Frame], segments: &[Segment], edits: &[NoteEdit]) -> Vec
                 };
                 let glide_len = nc.onset_glide.len();
                 let core_len = src_len - glide_len;
-                let (glide_out, core_out) = match edit.out_len {
+                // Melodyne's transition speed is timing-neutral: the segment's
+                // total length is fixed by out_len (or unchanged); glide_time_scale
+                // only redistributes frames between the glide and the core.
+                let total = match edit.out_len {
                     Some(0) => continue,
-                    Some(x) => {
-                        let stretch = x as f64 / src_len as f64;
-                        let g = ((glide_len as f64 * edit.glide_time_scale * stretch).round()
-                            as usize)
-                            .min(x - 1);
-                        (g, x - g)
-                    }
-                    None => (
-                        (glide_len as f64 * edit.glide_time_scale).round() as usize,
-                        core_len,
-                    ),
+                    Some(x) => x,
+                    None => src_len,
                 };
+                let stretch = total as f64 / src_len as f64;
+                let glide_out = ((glide_len as f64 * edit.glide_time_scale * stretch).round()
+                    as usize)
+                    .min(total - 1);
+                let core_out = total - glide_out;
 
                 let center = edit.target_cents.unwrap_or(nc.center_cents);
                 let entry_cents = center
