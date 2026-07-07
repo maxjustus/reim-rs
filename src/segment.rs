@@ -261,20 +261,21 @@ pub fn decompose_contour(
     // Detrended signal
     let detrended: Vec<f64> = (0..n).map(|i| deviation[i] - drift[i]).collect();
 
+    let no_vibrato = |drift: Vec<f64>, residual: Vec<f64>| NoteContour {
+        center_cents: center,
+        onset_glide: Vec::new(),
+        onset_glide_depth_cents: 0.0,
+        drift,
+        vibrato_rate_hz: 0.0,
+        vibrato_amp: vec![0.0; n],
+        vibrato_phase: vec![0.0; n],
+        residual,
+    };
+
     // Vibrato extraction
     let min_frames = (2.0 * frame_rate_hz / config.vibrato_min_hz).ceil() as usize;
     if n < min_frames {
-        let residual = detrended;
-        return NoteContour {
-            center_cents: center,
-            onset_glide: Vec::new(),
-            onset_glide_depth_cents: 0.0,
-            drift,
-            vibrato_rate_hz: 0.0,
-            vibrato_amp: vec![0.0; n],
-            vibrato_phase: vec![0.0; n],
-            residual,
-        };
+        return no_vibrato(drift, detrended);
     }
 
     // Autocorrelation to find vibrato rate
@@ -284,16 +285,7 @@ pub fn decompose_contour(
     let lag_max = lag_max.min(n - 1);
 
     if acorr[0] < 1e-10 {
-        return NoteContour {
-            center_cents: center,
-            onset_glide: Vec::new(),
-            onset_glide_depth_cents: 0.0,
-            drift,
-            vibrato_rate_hz: 0.0,
-            vibrato_amp: vec![0.0; n],
-            vibrato_phase: vec![0.0; n],
-            residual: detrended,
-        };
+        return no_vibrato(drift, detrended);
     }
 
     let threshold = 0.3 * acorr[0];
@@ -310,17 +302,7 @@ pub fn decompose_contour(
     }
 
     if best_val <= threshold || best_lag == 0 {
-        // No vibrato detected
-        return NoteContour {
-            center_cents: center,
-            onset_glide: Vec::new(),
-            onset_glide_depth_cents: 0.0,
-            drift,
-            vibrato_rate_hz: 0.0,
-            vibrato_amp: vec![0.0; n],
-            vibrato_phase: vec![0.0; n],
-            residual: detrended,
-        };
+        return no_vibrato(drift, detrended);
     }
 
     let vibrato_rate = frame_rate_hz / best_lag as f64;
@@ -356,55 +338,28 @@ pub fn decompose_contour(
 }
 
 /// Fold stair-stepped transition chunks into the following range, then refine
-/// each note boundary into (range, onset_glide_len) pairs by expanding along
+/// each note onset into (range, onset_glide_len) pairs by expanding along
 /// steep monotone slopes. Ranges stay contiguous; a glide's frames belong to
-/// the following note.
+/// the following note. `cents` is the cleaned contour in cents, indexed
+/// absolutely.
 fn attach_glides(
-    mut merged: Vec<Range<usize>>,
-    cleaned: &[f64],
+    merged: &[Range<usize>],
+    cents: &[f64],
     run_end: usize,
     frame_rate_hz: f64,
     config: &SegmentConfig,
 ) -> Vec<(Range<usize>, usize)> {
-    let cents_at = |j: usize| hz_to_cents(cleaned[j]);
     let th = config.glide_slope_cents_per_sec / frame_rate_hz;
+    let band = config.stability_cents / 2.0;
 
-    // Phase 0: vibrato near the stability threshold chops one note into
-    // half-cycle chunks (the running center gets seeded from a vibrato
-    // extreme). Re-merge adjacent ranges whose union still reads as one
-    // stable note; distinct notes fail because their union is bimodal.
-    let mut k = 0;
-    while k + 1 < merged.len() {
-        let a_vals: Vec<f64> = (merged[k].start..merged[k].end).map(cents_at).collect();
-        let b_vals: Vec<f64> = (merged[k + 1].start..merged[k + 1].end)
-            .map(cents_at)
-            .collect();
-        let union: Vec<f64> = (merged[k].start..merged[k + 1].end).map(cents_at).collect();
-        let m = median_cents(&union);
-        let within = union
-            .iter()
-            .filter(|&&c| (c - m).abs() < config.stability_cents)
-            .count();
-        let one_note = within as f64 / union.len() as f64 >= 0.85
-            && (median_cents(&a_vals) - m).abs() < config.stability_cents
-            && (median_cents(&b_vals) - m).abs() < config.stability_cents;
-        if one_note {
-            merged[k].end = merged[k + 1].end;
-            merged.remove(k + 1);
-        } else {
-            k += 1;
-        }
-    }
-
-    // Phase 1: monotone transition chunks merge into the next stable range as
-    // its pre-attached glide (a slow portamento gets carved into several
+    // Monotone transition chunks merge into the next stable range as its
+    // pre-attached glide (a slow portamento gets carved into several
     // stair-step "notes" by the boundary detector; they are really one glide).
     let mut ranges: Vec<(Range<usize>, usize)> = Vec::new();
     let mut chain_start: Option<usize> = None;
-    for range in &merged {
+    for range in merged {
         let len = range.end - range.start;
-        let slice: Vec<f64> = (range.start..range.end).map(cents_at).collect();
-        if len >= config.min_note_frames && is_transition(&slice, th) {
+        if len >= config.min_note_frames && is_transition(&cents[range.start..range.end], th) {
             chain_start.get_or_insert(range.start);
             continue;
         }
@@ -423,80 +378,74 @@ fn attach_glides(
         ranges.push((cs..run_end, 0));
     }
 
-    // Scoop: a glide out of silence at the run start. The glide's own first
-    // frame anchors the depth; there is no previous note to expand into.
-    if let Some((b, pre)) = ranges.first().cloned() {
-        let core_start = b.start + pre;
-        if b.end - core_start >= config.min_note_frames {
-            let b_cents: Vec<f64> = (core_start..b.end).map(cents_at).collect();
-            let c_b = median_cents(&b_cents);
-            let dir = (c_b - cents_at(b.start)).signum();
-            let band = config.stability_cents / 2.0;
-            let g_start = b.start;
-            let mut g_end = core_start;
-            while g_end < b.end - config.min_note_frames
-                && g_end - g_start < config.max_glide_frames
-                && dir * (cents_at(g_end + 1) - cents_at(g_end)) >= th
-                && dir * (c_b - cents_at(g_end)) > band
-            {
-                g_end += 1;
-            }
-            let depth = dir * (cents_at(g_end) - cents_at(g_start));
-            ranges[0].1 = if g_end - g_start >= 2 && depth >= config.glide_min_cents {
-                g_end - g_start
-            } else {
-                0
-            };
-        }
-    }
-
-    // Phase 2: refine the glide extent at each boundary between two notes.
-    for k in 1..ranges.len() {
-        let (a, a_glide) = ranges[k - 1].clone();
+    // Refine the glide extent at each note onset. k == 0 is a scoop out of
+    // silence: no previous note to expand back into, and the depth anchors
+    // on the glide's own first frame instead of the previous note's last.
+    for k in 0..ranges.len() {
         let (b, pre) = ranges[k].clone();
-        let a_core_start = a.start + a_glide;
         let core_start = b.start + pre;
-        if a.end - a_core_start < config.min_note_frames
-            || b.end - core_start < config.min_note_frames
-        {
+        if b.end - core_start < config.min_note_frames {
             continue;
         }
+        let c_b = median_cents(&cents[core_start..b.end]);
 
-        let a_cents: Vec<f64> = (a_core_start..a.end).map(cents_at).collect();
-        let b_cents: Vec<f64> = (core_start..b.end).map(cents_at).collect();
-        let c_a = median_cents(&a_cents);
-        let c_b = median_cents(&b_cents);
-        if (c_b - c_a).abs() < config.glide_min_cents {
-            ranges[k].1 = 0;
-            continue;
-        }
-        let dir = (c_b - c_a).signum();
-        let band = config.stability_cents / 2.0;
+        let prev = if k > 0 {
+            let (a, a_glide) = ranges[k - 1].clone();
+            let a_core_start = a.start + a_glide;
+            if a.end - a_core_start < config.min_note_frames {
+                continue;
+            }
+            Some((a_core_start, median_cents(&cents[a_core_start..a.end])))
+        } else {
+            None
+        };
+
+        let dir = match prev {
+            Some((_, c_a)) => {
+                if (c_b - c_a).abs() < config.glide_min_cents {
+                    ranges[k].1 = 0;
+                    continue;
+                }
+                (c_b - c_a).signum()
+            }
+            None => (c_b - cents[b.start]).signum(),
+        };
 
         let mut g_start = b.start;
         let mut g_end = core_start;
-        while g_start > a_core_start + config.min_note_frames
-            && g_end - g_start < config.max_glide_frames
-            && dir * (cents_at(g_start) - cents_at(g_start - 1)) >= th
-            && dir * (cents_at(g_start - 1) - c_a) > band
-        {
-            g_start -= 1;
+        if let Some((a_core_start, c_a)) = prev {
+            while g_start > a_core_start + config.min_note_frames
+                && g_end - g_start < config.max_glide_frames
+                && dir * (cents[g_start] - cents[g_start - 1]) >= th
+                && dir * (cents[g_start - 1] - c_a) > band
+            {
+                g_start -= 1;
+            }
         }
         while g_end < b.end - config.min_note_frames
             && g_end - g_start < config.max_glide_frames
-            && dir * (cents_at(g_end + 1) - cents_at(g_end)) >= th
-            && dir * (c_b - cents_at(g_end)) > band
+            && dir * (cents[g_end + 1] - cents[g_end]) >= th
+            && dir * (c_b - cents[g_end]) > band
         {
             g_end += 1;
         }
-        if g_end - g_start > config.max_glide_frames {
+        // A pre-attached chain can exceed the cap; trim from the start so the
+        // excess frames stay with the previous note.
+        if prev.is_some() && g_end - g_start > config.max_glide_frames {
             g_start = g_end - config.max_glide_frames;
         }
 
-        let depth = dir * (cents_at(g_end) - cents_at(g_start - 1));
+        let depth_anchor = if prev.is_some() {
+            cents[g_start - 1]
+        } else {
+            cents[g_start]
+        };
+        let depth = dir * (cents[g_end] - depth_anchor);
         if g_end - g_start >= 2 && depth >= config.glide_min_cents {
-            ranges[k - 1].0.end = g_start;
-            ranges[k].0.start = g_start;
+            if prev.is_some() {
+                ranges[k - 1].0.end = g_start;
+                ranges[k].0.start = g_start;
+            }
             ranges[k].1 = g_end - g_start;
         } else {
             ranges[k].1 = 0;
@@ -513,6 +462,11 @@ pub fn segment(frames: &[Frame], frame_rate_hz: f64, config: &SegmentConfig) -> 
 
     let mut planner = FftPlanner::<f64>::new();
     let cleaned = clean_contour(frames, config.median_window);
+    // Cleaned contour in cents; 0.0 for unvoiced frames (never read there).
+    let cents: Vec<f64> = cleaned
+        .iter()
+        .map(|&h| if h > 0.0 { hz_to_cents(h) } else { 0.0 })
+        .collect();
 
     // Split into voiced/unvoiced runs.
     struct Run {
@@ -548,9 +502,7 @@ pub fn segment(frames: &[Frame], frame_rate_hz: f64, config: &SegmentConfig) -> 
             continue;
         }
 
-        let run_cents: Vec<f64> = (run.start..run.end)
-            .map(|j| hz_to_cents(cleaned[j]))
-            .collect();
+        let run_cents = &cents[run.start..run.end];
 
         // Detect note boundaries within this voiced run.
         let mut note_boundaries: Vec<usize> = vec![0]; // offsets within the run
@@ -635,7 +587,32 @@ pub fn segment(frames: &[Frame], frame_rate_hz: f64, config: &SegmentConfig) -> 
             }
         }
 
-        let ranges = attach_glides(merged, &cleaned, run.end, frame_rate_hz, config);
+        // Vibrato near the stability threshold chops one note into half-cycle
+        // chunks (the running center gets seeded from a vibrato extreme).
+        // Re-merge adjacent ranges whose union still reads as one stable
+        // note; distinct notes fail because their union is bimodal.
+        let mut k = 0;
+        while k + 1 < merged.len() {
+            let union = &cents[merged[k].start..merged[k + 1].end];
+            let m = median_cents(union);
+            let within = union
+                .iter()
+                .filter(|&&c| (c - m).abs() < config.stability_cents)
+                .count();
+            let one_note = within as f64 / union.len() as f64 >= 0.85
+                && (median_cents(&cents[merged[k].start..merged[k].end]) - m).abs()
+                    < config.stability_cents
+                && (median_cents(&cents[merged[k + 1].start..merged[k + 1].end]) - m).abs()
+                    < config.stability_cents;
+            if one_note {
+                merged[k].end = merged[k + 1].end;
+                merged.remove(k + 1);
+            } else {
+                k += 1;
+            }
+        }
+
+        let ranges = attach_glides(&merged, &cents, run.end, frame_rate_hz, config);
 
         for (range, glide_len) in ranges {
             let len = range.end - range.start;
@@ -748,6 +725,16 @@ fn interp_frame(fa: &Frame, fb: &Frame, t: f64, fo: f64) -> Frame {
     }
 }
 
+/// Source-track position for output frame j when resampling src_len frames
+/// to out_len frames.
+fn src_pos(j: usize, src_len: usize, out_len: usize) -> f64 {
+    if out_len <= 1 {
+        0.0
+    } else {
+        j as f64 * (src_len - 1) as f64 / (out_len - 1) as f64
+    }
+}
+
 pub fn render(frames: &[Frame], segments: &[Segment], edits: &[NoteEdit]) -> Vec<Frame> {
     let mut output = Vec::new();
     let mut last_voiced_exit_cents: Option<f64> = None;
@@ -761,11 +748,7 @@ pub fn render(frames: &[Frame], segments: &[Segment], edits: &[NoteEdit]) -> Vec
                 last_voiced_exit_cents = None;
                 let out_len = edit.and_then(|e| e.out_len).unwrap_or(src_len);
                 for j in 0..out_len {
-                    let s = if out_len <= 1 {
-                        0.0
-                    } else {
-                        j as f64 * (src_len - 1) as f64 / (out_len - 1) as f64
-                    };
+                    let s = src_pos(j, src_len, out_len);
                     let idx = (s.floor() as usize).min(src_len - 1);
                     let abs_idx = seg.frames.start + idx;
                     output.push(frames[abs_idx].clone());
@@ -812,11 +795,7 @@ pub fn render(frames: &[Frame], segments: &[Segment], edits: &[NoteEdit]) -> Vec
                     let start_cents =
                         last_voiced_exit_cents.unwrap_or(entry_cents - nc.onset_glide_depth_cents);
                     for j in 0..glide_out {
-                        let s = if glide_out <= 1 {
-                            0.0
-                        } else {
-                            j as f64 * (glide_len - 1) as f64 / (glide_out - 1) as f64
-                        };
+                        let s = src_pos(j, glide_len, glide_out);
                         let shape = lerp_track(&nc.onset_glide, s);
                         let shape = (1.0 - edit.glide_scale) + edit.glide_scale * shape;
                         let cents = start_cents + shape * (entry_cents - start_cents);
@@ -837,11 +816,7 @@ pub fn render(frames: &[Frame], segments: &[Segment], edits: &[NoteEdit]) -> Vec
                 let mut last_cents = entry_cents;
 
                 for j in 0..core_out {
-                    let s = if core_out <= 1 {
-                        0.0
-                    } else {
-                        j as f64 * (core_len - 1) as f64 / (core_out - 1) as f64
-                    };
+                    let s = src_pos(j, core_len, core_out);
                     let idx = (s.floor() as usize).min(core_len - 1);
                     let idx1 = (idx + 1).min(core_len - 1);
 

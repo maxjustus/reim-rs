@@ -718,12 +718,10 @@ fn glide_fixture() -> (Vec<Frame>, Vec<reim::segment::Segment>, usize, usize, f6
 #[test]
 fn render_glide_retargets_after_pitch_edit() {
     let (frames, segs, a_len, g, old_entry) = glide_fixture();
-    let mut edit = NoteEdit::identity(1);
-    let center = match &segs[1].kind {
-        SegmentKind::Note(nc) => nc.center_cents,
-        _ => unreachable!(),
+    let edit = NoteEdit {
+        target_cents: Some(note_contours(&segs)[1].center_cents + 100.0),
+        ..NoteEdit::identity(1)
     };
-    edit.target_cents = Some(center + 100.0);
     let rendered = render(&frames, &segs, &[edit]);
     assert_eq!(rendered.len(), frames.len());
 
@@ -820,16 +818,18 @@ fn render_glide_survives_time_stretch() {
 #[test]
 fn render_glide_connects_two_edited_notes() {
     let (frames, segs, a_len, g, old_entry) = glide_fixture();
-    let mut edit_a = NoteEdit::identity(0);
-    edit_a.target_cents = Some(match &segs[0].kind {
-        SegmentKind::Note(nc) => nc.center_cents - 100.0,
-        _ => unreachable!(),
-    });
-    let mut edit_b = NoteEdit::identity(1);
-    edit_b.target_cents = Some(match &segs[1].kind {
-        SegmentKind::Note(nc) => nc.center_cents + 100.0,
-        _ => unreachable!(),
-    });
+    let centers: Vec<f64> = note_contours(&segs)
+        .iter()
+        .map(|nc| nc.center_cents)
+        .collect();
+    let edit_a = NoteEdit {
+        target_cents: Some(centers[0] - 100.0),
+        ..NoteEdit::identity(0)
+    };
+    let edit_b = NoteEdit {
+        target_cents: Some(centers[1] + 100.0),
+        ..NoteEdit::identity(1)
+    };
     let rendered = render(&frames, &segs, &[edit_a, edit_b]);
 
     let exit = hz_to_cents(rendered[a_len - 1].fo);
@@ -892,14 +892,9 @@ fn render_pitch_correction() {
     let segs = segment(&frames, 200.0, &config);
 
     let edits = vec![NoteEdit {
-        segment_index: 0,
         target_cents: Some(0.0), // A4
         drift_scale: 0.0,
-        vibrato_scale: 1.0,
-        vibrato_rate_scale: 1.0,
-        glide_scale: 1.0,
-        glide_time_scale: 1.0,
-        out_len: None,
+        ..NoteEdit::identity(0)
     }];
 
     let rendered = render(&frames, &segs, &edits);
@@ -931,14 +926,8 @@ fn render_vibrato_removal() {
     let segs = segment(&frames, 200.0, &config);
 
     let edits = vec![NoteEdit {
-        segment_index: 0,
-        target_cents: None,
-        drift_scale: 1.0,
         vibrato_scale: 0.0,
-        vibrato_rate_scale: 1.0,
-        glide_scale: 1.0,
-        glide_time_scale: 1.0,
-        out_len: None,
+        ..NoteEdit::identity(0)
     }];
 
     let rendered = render(&frames, &segs, &edits);
@@ -973,14 +962,8 @@ fn render_time_stretch() {
     let segs = segment(&frames, 200.0, &config);
 
     let edits = vec![NoteEdit {
-        segment_index: 0,
-        target_cents: None,
-        drift_scale: 1.0,
-        vibrato_scale: 1.0,
-        vibrato_rate_scale: 1.0,
-        glide_scale: 1.0,
-        glide_time_scale: 1.0,
         out_len: Some(100),
+        ..NoteEdit::identity(0)
     }];
 
     let rendered = render(&frames, &segs, &edits);
@@ -1077,14 +1060,9 @@ fn e2e_pitch_correction() {
         .enumerate()
         .filter(|(_, s)| matches!(s.kind, SegmentKind::Note(_)))
         .map(|(i, _)| NoteEdit {
-            segment_index: i,
             target_cents: Some(target),
             drift_scale: 0.0,
-            vibrato_scale: 1.0,
-            vibrato_rate_scale: 1.0,
-            glide_scale: 1.0,
-            glide_time_scale: 1.0,
-            out_len: None,
+            ..NoteEdit::identity(i)
         })
         .collect();
 
@@ -1118,14 +1096,8 @@ fn e2e_vibrato_removal() {
         .enumerate()
         .filter(|(_, s)| matches!(s.kind, SegmentKind::Note(_)))
         .map(|(i, _)| NoteEdit {
-            segment_index: i,
-            target_cents: None,
-            drift_scale: 1.0,
             vibrato_scale: 0.0,
-            vibrato_rate_scale: 1.0,
-            glide_scale: 1.0,
-            glide_time_scale: 1.0,
-            out_len: None,
+            ..NoteEdit::identity(i)
         })
         .collect();
 
@@ -1181,14 +1153,8 @@ fn e2e_time_stretch() {
         .enumerate()
         .filter(|(_, s)| matches!(s.kind, SegmentKind::Note(_)))
         .map(|(i, s)| NoteEdit {
-            segment_index: i,
-            target_cents: None,
-            drift_scale: 1.0,
-            vibrato_scale: 1.0,
-            vibrato_rate_scale: 1.0,
-            glide_scale: 1.0,
-            glide_time_scale: 1.0,
             out_len: Some(s.frames.len() * 2),
+            ..NoteEdit::identity(i)
         })
         .collect();
 
@@ -1329,14 +1295,9 @@ fn write_pitch_correction() {
             if let SegmentKind::Note(c) = &s.kind {
                 let nearest_semitone = (c.center_cents / 100.0).round() * 100.0;
                 Some(NoteEdit {
-                    segment_index: i,
                     target_cents: Some(nearest_semitone),
                     drift_scale: 0.0,
-                    vibrato_scale: 1.0,
-                    vibrato_rate_scale: 1.0,
-                    glide_scale: 1.0,
-                    glide_time_scale: 1.0,
-                    out_len: None,
+                    ..NoteEdit::identity(i)
                 })
             } else {
                 None
@@ -1379,14 +1340,8 @@ fn write_vibrato_removal() {
         .enumerate()
         .filter(|(_, s)| matches!(s.kind, SegmentKind::Note(_)))
         .map(|(i, _)| NoteEdit {
-            segment_index: i,
-            target_cents: None,
-            drift_scale: 1.0,
             vibrato_scale: 0.0,
-            vibrato_rate_scale: 1.0,
-            glide_scale: 1.0,
-            glide_time_scale: 1.0,
-            out_len: None,
+            ..NoteEdit::identity(i)
         })
         .collect();
 
@@ -1426,14 +1381,8 @@ fn write_transpose() {
         .filter_map(|(i, s)| {
             if let SegmentKind::Note(c) = &s.kind {
                 Some(NoteEdit {
-                    segment_index: i,
                     target_cents: Some(c.center_cents + 300.0),
-                    drift_scale: 1.0,
-                    vibrato_scale: 1.0,
-                    vibrato_rate_scale: 1.0,
-                    glide_scale: 1.0,
-                    glide_time_scale: 1.0,
-                    out_len: None,
+                    ..NoteEdit::identity(i)
                 })
             } else {
                 None
@@ -1468,14 +1417,8 @@ fn write_time_stretch() {
         .enumerate()
         .filter(|(_, s)| matches!(s.kind, SegmentKind::Note(_)))
         .map(|(i, s)| NoteEdit {
-            segment_index: i,
-            target_cents: None,
-            drift_scale: 1.0,
-            vibrato_scale: 1.0,
-            vibrato_rate_scale: 1.0,
-            glide_scale: 1.0,
-            glide_time_scale: 1.0,
             out_len: Some((s.frames.len() as f64 * 1.5) as usize),
+            ..NoteEdit::identity(i)
         })
         .collect();
 
