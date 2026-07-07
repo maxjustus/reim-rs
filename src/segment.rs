@@ -731,8 +731,6 @@ pub struct NoteEdit {
     pub drift_scale: f64,
     pub vibrato_scale: f64,
     pub vibrato_rate_scale: f64,
-    /// 1.0 = original glide curve, 0.0 = hard step (duration unchanged).
-    pub glide_scale: f64,
     /// Scales glide duration; 0.0 drops the glide frames (note shortens).
     pub glide_time_scale: f64,
     pub out_len: Option<usize>,
@@ -746,7 +744,6 @@ impl NoteEdit {
             drift_scale: 1.0,
             vibrato_scale: 1.0,
             vibrato_rate_scale: 1.0,
-            glide_scale: 1.0,
             glide_time_scale: 1.0,
             out_len: None,
         }
@@ -810,23 +807,23 @@ fn src_pos(j: usize, src_len: usize, out_len: usize) -> f64 {
 /// (glide_out, core_out) frame counts for a `Note` segment under `edit`, or
 /// `None` when the edit drops the whole segment (`out_len: Some(0)`). Shared
 /// by `render()` and [`segment_output_len`] so the two can't drift apart.
-fn note_render_lengths(src_len: usize, glide_len: usize, edit: &NoteEdit) -> Option<(usize, usize)> {
-    match edit.out_len {
-        Some(0) => None,
-        Some(x) => {
-            let stretch = x as f64 / src_len as f64;
-            let g = ((glide_len as f64 * edit.glide_time_scale * stretch).round() as usize)
-                .min(x - 1);
-            Some((g, x - g))
-        }
-        None => {
-            let core_len = src_len - glide_len;
-            Some((
-                (glide_len as f64 * edit.glide_time_scale).round() as usize,
-                core_len,
-            ))
-        }
-    }
+fn note_render_lengths(
+    src_len: usize,
+    glide_len: usize,
+    edit: &NoteEdit,
+) -> Option<(usize, usize)> {
+    // Melodyne's transition speed is timing-neutral: the segment's total length
+    // is fixed by out_len (or unchanged); glide_time_scale only redistributes
+    // frames between the glide and the core.
+    let total = match edit.out_len {
+        Some(0) => return None,
+        Some(x) => x,
+        None => src_len,
+    };
+    let stretch = total as f64 / src_len as f64;
+    let glide_out =
+        ((glide_len as f64 * edit.glide_time_scale * stretch).round() as usize).min(total - 1);
+    Some((glide_out, total - glide_out))
 }
 
 /// Number of output frames [`render`] will produce for `seg` given `edit`
@@ -905,7 +902,6 @@ pub fn render(frames: &[Frame], segments: &[Segment], edits: &[NoteEdit]) -> Vec
                     for j in 0..glide_out {
                         let s = src_pos(j, glide_len, glide_out);
                         let shape = lerp_track(&nc.onset_glide, s);
-                        let shape = (1.0 - edit.glide_scale) + edit.glide_scale * shape;
                         let cents = start_cents + shape * (entry_cents - start_cents);
                         let idx = (s.floor() as usize).min(glide_len - 1);
                         let idx1 = (idx + 1).min(glide_len - 1);

@@ -791,32 +791,13 @@ fn render_glide_retargets_after_pitch_edit() {
 }
 
 #[test]
-fn render_glide_scale_zero_is_hard_step() {
-    let (frames, segs, a_len, g, entry) = glide_fixture();
-    let mut edit = NoteEdit::identity(1);
-    edit.glide_scale = 0.0;
-    let rendered = render(&frames, &segs, &[edit]);
-    assert_eq!(rendered.len(), frames.len(), "duration unchanged");
-    for (i, f) in rendered.iter().enumerate().take(a_len + g).skip(a_len) {
-        let c = hz_to_cents(f.fo);
-        assert!(
-            (c - entry).abs() < 1e-9,
-            "glide frame {i} at {c}, expected entry pitch {entry}"
-        );
-    }
-}
-
-#[test]
 fn render_glide_time_scale_stretches_glide() {
     let (frames, segs, a_len, g, entry) = glide_fixture();
     let mut edit = NoteEdit::identity(1);
     edit.glide_time_scale = 2.0;
     let rendered = render(&frames, &segs, &[edit]);
-    assert_eq!(
-        rendered.len(),
-        frames.len() + g,
-        "glide doubles, core unchanged"
-    );
+    // Timing-neutral: total length unchanged, glide grows and core compresses.
+    assert_eq!(rendered.len(), frames.len(), "total length unchanged");
     let last_glide = hz_to_cents(rendered[a_len + 2 * g - 1].fo);
     assert!(
         (last_glide - entry).abs() < 80.0,
@@ -825,20 +806,18 @@ fn render_glide_time_scale_stretches_glide() {
 }
 
 #[test]
-fn render_glide_time_scale_zero_drops_glide() {
-    let (frames, segs, a_len, g, entry) = glide_fixture();
+fn render_glide_time_scale_zero_is_hard_step() {
+    let (frames, segs, a_len, _g, entry) = glide_fixture();
     let mut edit = NoteEdit::identity(1);
     edit.glide_time_scale = 0.0;
     let rendered = render(&frames, &segs, &[edit]);
-    assert_eq!(
-        rendered.len(),
-        frames.len() - g,
-        "note shortens by glide_len"
-    );
+    // Timing-neutral hard step: no glide frames, length unchanged, note
+    // begins at the entry pitch.
+    assert_eq!(rendered.len(), frames.len(), "total length unchanged");
     let first = hz_to_cents(rendered[a_len].fo);
     assert!(
         (first - entry).abs() < 1e-9,
-        "note now starts at entry pitch, got {first} vs {entry}"
+        "note now starts at entry pitch (hard step), got {first} vs {entry}"
     );
 }
 
@@ -891,14 +870,15 @@ fn segment_output_len_matches_render_span_out_len() {
 
 #[test]
 fn segment_output_len_matches_render_span_glide_time_scale() {
-    let (frames, segs, a_len, g, _) = glide_fixture();
+    let (frames, segs, a_len, _g, _) = glide_fixture();
     let mut edit = NoteEdit::identity(1);
     edit.glide_time_scale = 2.0;
     let rendered = render(&frames, &segs, std::slice::from_ref(&edit));
     let len_a = reim::segment::segment_output_len(&segs[0], None);
     let len_b = reim::segment::segment_output_len(&segs[1], Some(&edit));
     assert_eq!(len_a, a_len);
-    assert_eq!(len_b, segs[1].frames.len() + g, "glide doubles, core unchanged");
+    // Timing-neutral: total length unchanged (glide grows, core compresses).
+    assert_eq!(len_b, segs[1].frames.len(), "total length unchanged");
     assert_eq!(len_a + len_b, rendered.len());
 }
 
@@ -1575,4 +1555,3 @@ fn write_contour_csv() {
         }
     }
 }
-
