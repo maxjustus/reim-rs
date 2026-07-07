@@ -1577,16 +1577,19 @@ impl D4c {
             for j in 0..=half {
                 self.power_spectrum[j] = complex_abs2(self.re[j], self.im[j]);
             }
-            // total_cmp (not partial_cmp) so a NaN from a degenerate frame (e.g. a pure
-            // tone with near-zero broadband energy) sorts deterministically instead of
-            // panicking; finite values order identically.
-            self.power_spectrum[..=half].sort_unstable_by(f64::total_cmp);
-            for j in 1..=half {
-                self.power_spectrum[j] += self.power_spectrum[j - 1];
-            }
-            let total = self.power_spectrum[half];
+            // Only the sum of the smallest (half - boundary) values and the
+            // grand total are needed, so an O(n) partition replaces the full
+            // sort the C reference uses. total_cmp (not partial_cmp) so a NaN
+            // from a degenerate frame (e.g. a pure tone with near-zero
+            // broadband energy) partitions deterministically instead of
+            // panicking.
+            let cut = half - boundary - 1;
+            let slice = &mut self.power_spectrum[..=half];
+            slice.select_nth_unstable_by(cut, f64::total_cmp);
+            let low_sum: f64 = slice[..=cut].iter().sum();
+            let total = low_sum + slice[cut + 1..].iter().sum::<f64>();
             self.coarse_aperiodicity[i + 1] = if total > D4C_SAFE_GUARD_MINIMUM {
-                10.0 * (self.power_spectrum[half - boundary - 1] / total).log10()
+                10.0 * (low_sum / total).log10()
             } else {
                 -D4C_SAFE_GUARD_MINIMUM
             };

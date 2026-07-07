@@ -100,6 +100,53 @@ fn median_cents(vals: &[f64]) -> f64 {
     sorted[sorted.len() / 2]
 }
 
+#[derive(Clone, Copy, PartialEq)]
+struct TotalF64(f64);
+impl Eq for TotalF64 {}
+impl PartialOrd for TotalF64 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for TotalF64 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
+/// Incremental median over a growing set: O(log n) push. Matches
+/// `median_cents` (upper median for even counts).
+#[derive(Default)]
+struct RunningMedian {
+    lo: std::collections::BinaryHeap<TotalF64>,
+    hi: std::collections::BinaryHeap<std::cmp::Reverse<TotalF64>>,
+}
+
+impl RunningMedian {
+    fn push(&mut self, x: f64) {
+        match self.hi.peek() {
+            Some(&std::cmp::Reverse(top)) if x < top.0 => self.lo.push(TotalF64(x)),
+            _ => self.hi.push(std::cmp::Reverse(TotalF64(x))),
+        }
+        if self.hi.len() > self.lo.len() + 1 {
+            let std::cmp::Reverse(v) = self.hi.pop().unwrap();
+            self.lo.push(v);
+        } else if self.lo.len() > self.hi.len() {
+            let v = self.lo.pop().unwrap();
+            self.hi.push(std::cmp::Reverse(v));
+        }
+    }
+
+    fn median(&self) -> f64 {
+        self.hi.peek().unwrap().0 .0
+    }
+
+    fn clear(&mut self) {
+        self.lo.clear();
+        self.hi.clear();
+    }
+}
+
 fn gaussian_lowpass(signal: &[f64], sigma: f64) -> Vec<f64> {
     let radius = (3.0 * sigma).ceil() as usize;
     if radius == 0 || signal.len() <= 1 {
@@ -144,15 +191,15 @@ fn gaussian_lowpass(signal: &[f64], sigma: f64) -> Vec<f64> {
     out
 }
 
-fn autocorrelation(signal: &[f64]) -> Vec<f64> {
+fn autocorrelation(signal: &[f64], max_lag: usize) -> Vec<f64> {
     let n = signal.len();
-    let mut result = vec![0.0; n];
-    for lag in 0..n {
+    let mut result = vec![0.0; max_lag.min(n - 1) + 1];
+    for (lag, r) in result.iter_mut().enumerate() {
         let mut sum = 0.0;
         for i in 0..n - lag {
             sum += signal[i] * signal[i + lag];
         }
-        result[lag] = sum;
+        *r = sum;
     }
     result
 }
@@ -278,11 +325,12 @@ pub fn decompose_contour(
         return no_vibrato(drift, detrended);
     }
 
-    // Autocorrelation to find vibrato rate
-    let acorr = autocorrelation(&detrended);
+    // Autocorrelation to find vibrato rate; only lags up to the slowest
+    // vibrato period are ever inspected.
     let lag_min = (frame_rate_hz / config.vibrato_max_hz).floor() as usize;
     let lag_max = (frame_rate_hz / config.vibrato_min_hz).ceil() as usize;
     let lag_max = lag_max.min(n - 1);
+    let acorr = autocorrelation(&detrended, lag_max);
 
     if acorr[0] < 1e-10 {
         return no_vibrato(drift, detrended);
@@ -511,7 +559,8 @@ pub fn segment(frames: &[Frame], frame_rate_hz: f64, config: &SegmentConfig) -> 
         let mut first_departed = 0;
 
         // Track running median of the current note for center pitch.
-        let mut current_note_cents: Vec<f64> = vec![run_cents[0]];
+        let mut current_note_median = RunningMedian::default();
+        current_note_median.push(run_cents[0]);
 
         for j in 1..run_cents.len() {
             let diff = (run_cents[j] - current_center).abs();
@@ -524,17 +573,17 @@ pub fn segment(frames: &[Frame], frame_rate_hz: f64, config: &SegmentConfig) -> 
                     // New note starts at first_departed.
                     note_boundaries.push(first_departed);
                     // Reset center to the median of the new note's frames so far.
-                    current_note_cents.clear();
+                    current_note_median.clear();
                     for k in first_departed..=j {
-                        current_note_cents.push(run_cents[k]);
+                        current_note_median.push(run_cents[k]);
                     }
-                    current_center = median_cents(&current_note_cents);
+                    current_center = current_note_median.median();
                     departed_count = 0;
                 }
             } else {
                 departed_count = 0;
-                current_note_cents.push(run_cents[j]);
-                current_center = median_cents(&current_note_cents);
+                current_note_median.push(run_cents[j]);
+                current_center = current_note_median.median();
             }
         }
 
@@ -698,6 +747,10 @@ fn lerp_track(track: &[f64], s: f64) -> f64 {
 /// Interpolate spectral data between two source frames; fo is supplied by the
 /// caller's contour model. Spectral envelope in log power, aperiodicity linear.
 fn interp_frame(fa: &Frame, fb: &Frame, t: f64, fo: f64) -> Frame {
+    // Identity/on-grid resampling lands exactly on a source frame.
+    if t == 0.0 || std::ptr::eq(fa, fb) {
+        return Frame { fo, ..fa.clone() };
+    }
     let floor = 1e-16_f64;
     let spectral_envelope: Vec<f64> = fa
         .spectral_envelope
