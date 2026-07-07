@@ -265,14 +265,20 @@ fn hilbert_analytic(signal: &[f64], planner: &mut FftPlanner<f64>) -> Vec<Comple
 
 /// A sustained, mostly-monotone pitch movement — a stair-step chunk the note
 /// boundary detector carves out of a portamento. Vibrato fails the monotone
-/// test (net movement ~0 over a chunk), genuine short notes fail the slope test.
-fn is_transition(cents: &[f64], per_frame_slope_th: f64) -> bool {
+/// test (net movement ~0 over a chunk), genuine short notes fail the slope
+/// test, and a note holding then gliding away fails the plateau test (its
+/// median sits at the held pitch, next to an endpoint).
+fn is_transition(cents: &[f64], per_frame_slope_th: f64, band: f64) -> bool {
     if cents.len() < 2 {
         return false;
     }
     let net = cents[cents.len() - 1] - cents[0];
     let mean_slope = net.abs() / (cents.len() - 1) as f64;
     if mean_slope < per_frame_slope_th {
+        return false;
+    }
+    let m = median_cents(cents);
+    if (m - cents[0]).abs() <= band || (m - cents[cents.len() - 1]).abs() <= band {
         return false;
     }
     let sum_abs: f64 = cents.windows(2).map(|w| (w[1] - w[0]).abs()).sum();
@@ -403,6 +409,14 @@ fn attach_glides(
 ) -> Vec<(Range<usize>, usize)> {
     let th = config.glide_slope_cents_per_sec / frame_rate_hz;
     let band = config.stability_cents / 2.0;
+    // Centered slope at j: single-frame diffs are brittle (the median filter
+    // can leave one flat pair mid-glide, which would halt expansion).
+    let run_start = merged.first().map_or(0, |r| r.start);
+    let slope = |j: usize| {
+        let a = j.saturating_sub(1).max(run_start);
+        let b = (j + 1).min(run_end - 1);
+        (cents[b] - cents[a]) / (b - a).max(1) as f64
+    };
 
     // Monotone transition chunks merge into the next stable range as its
     // pre-attached glide (a slow portamento gets carved into several
@@ -411,7 +425,8 @@ fn attach_glides(
     let mut chain_start: Option<usize> = None;
     for range in merged {
         let len = range.end - range.start;
-        if len >= config.min_note_frames && is_transition(&cents[range.start..range.end], th) {
+        if len >= config.min_note_frames && is_transition(&cents[range.start..range.end], th, band)
+        {
             chain_start.get_or_insert(range.start);
             continue;
         }
@@ -468,7 +483,7 @@ fn attach_glides(
         if let Some((a_core_start, c_a)) = prev {
             while g_start > a_core_start + config.min_note_frames
                 && g_end - g_start < config.max_glide_frames
-                && dir * (cents[g_start] - cents[g_start - 1]) >= th
+                && dir * slope(g_start - 1) >= th
                 && dir * (cents[g_start - 1] - c_a) > band
             {
                 g_start -= 1;
@@ -476,7 +491,7 @@ fn attach_glides(
         }
         while g_end < b.end - config.min_note_frames
             && g_end - g_start < config.max_glide_frames
-            && dir * (cents[g_end + 1] - cents[g_end]) >= th
+            && dir * slope(g_end) >= th
             && dir * (c_b - cents[g_end]) > band
         {
             g_end += 1;
@@ -554,7 +569,11 @@ pub fn segment(frames: &[Frame], frame_rate_hz: f64, config: &SegmentConfig) -> 
             continue;
         }
 
-        let run_cents = &cents[run.start..run.end];
+        // Boundary detection runs on a vibrato-suppressed contour: vibrato is
+        // a zero-mean oscillation at vibrato_min_hz+, so lowpassing below it
+        // leaves only actual pitch movement for the stability test to see.
+        let sigma = frame_rate_hz / (2.0 * PI * config.drift_cutoff_hz);
+        let run_cents = gaussian_lowpass(&cents[run.start..run.end], sigma);
 
         // Detect note boundaries within this voiced run.
         let mut note_boundaries: Vec<usize> = vec![0]; // offsets within the run
@@ -590,6 +609,26 @@ pub fn segment(frames: &[Frame], frame_rate_hz: f64, config: &SegmentConfig) -> 
                 current_center = current_note_median.median();
             }
         }
+
+        // The lowpass smears a pitch step over ~±3σ, so the threshold fires
+        // late; snap each boundary to the steepest smoothed slope nearby
+        // (Gaussian smoothing is zero-phase, so that's the transition center).
+        // Stair-step boundaries carved out of one smeared transition all snap
+        // to the same steepest frame and dedup away.
+        let radius = (3.0 * sigma).ceil() as usize;
+        for b in note_boundaries.iter_mut().skip(1) {
+            let lo = (*b).saturating_sub(radius).max(1);
+            let hi = (*b + radius).min(run_cents.len() - 1);
+            *b = (lo..=hi)
+                .max_by(|&x, &y| {
+                    let dx = (run_cents[x] - run_cents[x - 1]).abs();
+                    let dy = (run_cents[y] - run_cents[y - 1]).abs();
+                    dx.total_cmp(&dy)
+                })
+                .unwrap();
+        }
+        note_boundaries.sort_unstable();
+        note_boundaries.dedup();
 
         // Convert note boundaries to segments, folding short notes.
         let mut note_ranges: Vec<Range<usize>> = Vec::new();
@@ -637,31 +676,6 @@ pub fn segment(frames: &[Frame], frame_rate_hz: f64, config: &SegmentConfig) -> 
                 let len = merged.len();
                 merged[len - 2].end = last_end;
                 merged.pop();
-            }
-        }
-
-        // Vibrato near the stability threshold chops one note into half-cycle
-        // chunks (the running center gets seeded from a vibrato extreme).
-        // Re-merge adjacent ranges whose union still reads as one stable
-        // note; distinct notes fail because their union is bimodal.
-        let mut k = 0;
-        while k + 1 < merged.len() {
-            let union = &cents[merged[k].start..merged[k + 1].end];
-            let m = median_cents(union);
-            let within = union
-                .iter()
-                .filter(|&&c| (c - m).abs() < config.stability_cents)
-                .count();
-            let one_note = within as f64 / union.len() as f64 >= 0.85
-                && (median_cents(&cents[merged[k].start..merged[k].end]) - m).abs()
-                    < config.stability_cents
-                && (median_cents(&cents[merged[k + 1].start..merged[k + 1].end]) - m).abs()
-                    < config.stability_cents;
-            if one_note {
-                merged[k].end = merged[k + 1].end;
-                merged.remove(k + 1);
-            } else {
-                k += 1;
             }
         }
 

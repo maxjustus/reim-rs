@@ -522,6 +522,53 @@ fn glide_detected_between_notes() {
     );
 }
 
+fn vibrato_frames(center_hz: f64, extent_cents: f64, rate_hz: f64, n: usize) -> Vec<Frame> {
+    let base = hz_to_cents(center_hz);
+    (0..n)
+        .map(|i| {
+            let t = i as f64 / FRAME_RATE;
+            let c = base + extent_cents * (2.0 * std::f64::consts::PI * rate_hz * t).sin();
+            voiced_frame(cents_to_hz(c))
+        })
+        .collect()
+}
+
+#[test]
+fn deep_vibrato_single_note_not_split() {
+    // ±80 cents at 5.5 Hz: past stability_cents on every half-cycle,
+    // but the mean pitch never moves — must stay one note.
+    let frames = vibrato_frames(220.0, 80.0, 5.5, 400);
+    let segs = segment(&frames, FRAME_RATE, &SegmentConfig::default());
+    let notes = note_contours(&segs);
+    assert_eq!(
+        notes.len(),
+        1,
+        "deep vibrato split into {} notes",
+        notes.len()
+    );
+    let rate = notes[0].vibrato_rate_hz;
+    assert!(
+        (rate - 5.5).abs() < 1.0,
+        "vibrato rate {rate}, expected ~5.5 Hz"
+    );
+}
+
+#[test]
+fn deep_vibrato_step_still_two_notes() {
+    // A real note change (700 cents) with the same deep vibrato on both
+    // notes must still be detected as two notes.
+    let mut frames = vibrato_frames(220.0, 80.0, 5.5, 200);
+    frames.extend(vibrato_frames(330.0, 80.0, 5.5, 200));
+    let segs = segment(&frames, FRAME_RATE, &SegmentConfig::default());
+    let notes = note_contours(&segs);
+    assert_eq!(notes.len(), 2, "expected 2 notes, got {}", notes.len());
+    let step = notes[1].center_cents - notes[0].center_cents;
+    assert!(
+        (step - 702.0).abs() < 60.0,
+        "center step {step}, expected ~702 cents"
+    );
+}
+
 #[test]
 fn hard_step_has_no_glide() {
     let frames = glide_input(200.0, 300.0, 60, 0);
@@ -1528,3 +1575,4 @@ fn write_contour_csv() {
         }
     }
 }
+
