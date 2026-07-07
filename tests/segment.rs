@@ -816,6 +816,59 @@ fn render_glide_survives_time_stretch() {
 }
 
 #[test]
+fn segment_output_len_matches_render_span_identity() {
+    let (frames, segs, a_len, _g, _) = glide_fixture();
+    let rendered = render(&frames, &segs, &[]);
+    let len_a = reim::segment::segment_output_len(&segs[0], None);
+    let len_b = reim::segment::segment_output_len(&segs[1], None);
+    assert_eq!(len_a, a_len);
+    assert_eq!(len_a + len_b, rendered.len());
+    assert_eq!(len_b, frames.len() - a_len);
+}
+
+#[test]
+fn segment_output_len_matches_render_span_out_len() {
+    let (frames, segs, a_len, _g, _) = glide_fixture();
+    let src_len_b = segs[1].frames.len();
+    let edit = NoteEdit {
+        out_len: Some(2 * src_len_b),
+        ..NoteEdit::identity(1)
+    };
+    let rendered = render(&frames, &segs, std::slice::from_ref(&edit));
+    let len_a = reim::segment::segment_output_len(&segs[0], None);
+    let len_b = reim::segment::segment_output_len(&segs[1], Some(&edit));
+    assert_eq!(len_a, a_len);
+    assert_eq!(len_b, 2 * src_len_b);
+    assert_eq!(len_a + len_b, rendered.len());
+}
+
+#[test]
+fn segment_output_len_matches_render_span_glide_time_scale() {
+    let (frames, segs, a_len, g, _) = glide_fixture();
+    let mut edit = NoteEdit::identity(1);
+    edit.glide_time_scale = 2.0;
+    let rendered = render(&frames, &segs, std::slice::from_ref(&edit));
+    let len_a = reim::segment::segment_output_len(&segs[0], None);
+    let len_b = reim::segment::segment_output_len(&segs[1], Some(&edit));
+    assert_eq!(len_a, a_len);
+    assert_eq!(len_b, segs[1].frames.len() + g, "glide doubles, core unchanged");
+    assert_eq!(len_a + len_b, rendered.len());
+}
+
+#[test]
+fn segment_output_len_dropped_segment_is_zero() {
+    let (frames, segs, _a_len, _g, _) = glide_fixture();
+    let edit = NoteEdit {
+        out_len: Some(0),
+        ..NoteEdit::identity(1)
+    };
+    let rendered = render(&frames, &segs, std::slice::from_ref(&edit));
+    let len_b = reim::segment::segment_output_len(&segs[1], Some(&edit));
+    assert_eq!(len_b, 0);
+    assert_eq!(rendered.len(), segs[0].frames.len());
+}
+
+#[test]
 fn render_glide_connects_two_edited_notes() {
     let (frames, segs, a_len, g, old_entry) = glide_fixture();
     let centers: Vec<f64> = note_contours(&segs)

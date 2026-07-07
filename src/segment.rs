@@ -41,6 +41,7 @@ pub fn clean_contour(frames: &[Frame], median_window: usize) -> Vec<f64> {
     result
 }
 
+#[derive(Clone, Debug)]
 pub struct SegmentConfig {
     pub stability_cents: f64,
     pub min_note_frames: usize,
@@ -71,6 +72,7 @@ impl Default for SegmentConfig {
 
 /// The segment covers `onset_glide.len()` glide frames followed by the core;
 /// `drift`/`vibrato_*`/`residual` are core-only.
+#[derive(Clone, Debug)]
 pub struct NoteContour {
     pub center_cents: f64,
     /// Normalized glide shape (~0 at the previous pitch, ~1 at this note's
@@ -84,11 +86,13 @@ pub struct NoteContour {
     pub residual: Vec<f64>,
 }
 
+#[derive(Clone, Debug)]
 pub enum SegmentKind {
     Note(NoteContour),
     Unvoiced,
 }
 
+#[derive(Clone, Debug)]
 pub struct Segment {
     pub frames: Range<usize>,
     pub kind: SegmentKind,
@@ -706,6 +710,7 @@ pub fn segment(frames: &[Frame], frame_rate_hz: f64, config: &SegmentConfig) -> 
     segments
 }
 
+#[derive(Clone, Debug)]
 pub struct NoteEdit {
     pub segment_index: usize,
     pub target_cents: Option<f64>,
@@ -788,6 +793,52 @@ fn src_pos(j: usize, src_len: usize, out_len: usize) -> f64 {
     }
 }
 
+/// (glide_out, core_out) frame counts for a `Note` segment under `edit`, or
+/// `None` when the edit drops the whole segment (`out_len: Some(0)`). Shared
+/// by `render()` and [`segment_output_len`] so the two can't drift apart.
+fn note_render_lengths(src_len: usize, glide_len: usize, edit: &NoteEdit) -> Option<(usize, usize)> {
+    match edit.out_len {
+        Some(0) => None,
+        Some(x) => {
+            let stretch = x as f64 / src_len as f64;
+            let g = ((glide_len as f64 * edit.glide_time_scale * stretch).round() as usize)
+                .min(x - 1);
+            Some((g, x - g))
+        }
+        None => {
+            let core_len = src_len - glide_len;
+            Some((
+                (glide_len as f64 * edit.glide_time_scale).round() as usize,
+                core_len,
+            ))
+        }
+    }
+}
+
+/// Number of output frames [`render`] will produce for `seg` given `edit`
+/// (`None` = identity edit). Lets callers locate a segment's span within
+/// `render`'s flat output without re-deriving its length arithmetic.
+pub fn segment_output_len(seg: &Segment, edit: Option<&NoteEdit>) -> usize {
+    let src_len = seg.frames.end - seg.frames.start;
+    match &seg.kind {
+        SegmentKind::Unvoiced => edit.and_then(|e| e.out_len).unwrap_or(src_len),
+        SegmentKind::Note(nc) => {
+            let identity;
+            let edit = match edit {
+                Some(e) => e,
+                None => {
+                    identity = NoteEdit::identity(0);
+                    &identity
+                }
+            };
+            let glide_len = nc.onset_glide.len();
+            note_render_lengths(src_len, glide_len, edit)
+                .map(|(glide_out, core_out)| glide_out + core_out)
+                .unwrap_or(0)
+        }
+    }
+}
+
 pub fn render(frames: &[Frame], segments: &[Segment], edits: &[NoteEdit]) -> Vec<Frame> {
     let mut output = Vec::new();
     let mut last_voiced_exit_cents: Option<f64> = None;
@@ -818,19 +869,9 @@ pub fn render(frames: &[Frame], segments: &[Segment], edits: &[NoteEdit]) -> Vec
                 };
                 let glide_len = nc.onset_glide.len();
                 let core_len = src_len - glide_len;
-                let (glide_out, core_out) = match edit.out_len {
-                    Some(0) => continue,
-                    Some(x) => {
-                        let stretch = x as f64 / src_len as f64;
-                        let g = ((glide_len as f64 * edit.glide_time_scale * stretch).round()
-                            as usize)
-                            .min(x - 1);
-                        (g, x - g)
-                    }
-                    None => (
-                        (glide_len as f64 * edit.glide_time_scale).round() as usize,
-                        core_len,
-                    ),
+                let Some((glide_out, core_out)) = note_render_lengths(src_len, glide_len, edit)
+                else {
+                    continue;
                 };
 
                 let center = edit.target_cents.unwrap_or(nc.center_cents);
