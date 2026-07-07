@@ -36,6 +36,8 @@
     clippy::manual_range_contains
 )]
 
+pub mod segment;
+
 // The reference C code uses a *truncated* pi literal. Reproduce it exactly so the
 // windowing/phase math matches the C bit-for-bit where the FFT allows. The allow
 // is scoped to this one literal so approx_constant stays deny-by-default elsewhere.
@@ -2363,6 +2365,22 @@ impl Analyzer {
     pub fn set_voicing_score_min(&mut self, min: f64) {
         self.ap.score_min = min;
     }
+
+    pub fn analyze_to_frames(&mut self, samples: &[f64]) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        for &x in samples {
+            if self.push_sample(x) {
+                frames.push(Frame {
+                    fo: self.fo(),
+                    voiced: self.voiced(),
+                    silence: self.silence(),
+                    aperiodicity: self.aperiodicity().to_vec(),
+                    spectral_envelope: self.spectral_envelope().to_vec(),
+                });
+            }
+        }
+        frames
+    }
 }
 
 impl Synthesizer {
@@ -2430,6 +2448,60 @@ impl Synthesizer {
     pub fn next_sample(&mut self) -> f64 {
         self.syn.next_sample(&self.cfg, &mut self.fft)
     }
+
+    pub fn synthesize_frames(&mut self, frames: &[Frame]) -> Vec<f64> {
+        if frames.is_empty() {
+            return Vec::new();
+        }
+        let framesize = self.cfg.period / 1000.0 * self.cfg.fs;
+        let mut position: f64 = 0.0;
+        let mut frame_idx: usize = 0;
+        let mut output = Vec::new();
+
+        let total_samples = Self::frame_cadence_total_samples(framesize, frames.len());
+
+        for _ in 0..total_samples {
+            let fires = position.floor() == 0.0;
+            if fires && frame_idx < frames.len() {
+                let f = &frames[frame_idx];
+                self.push_frame(
+                    f.fo,
+                    f.voiced,
+                    f.silence,
+                    &f.aperiodicity,
+                    &f.spectral_envelope,
+                );
+                frame_idx += 1;
+            }
+            output.push(self.next_sample());
+            if position >= framesize - 1.0 {
+                position -= framesize - 1.0;
+            } else {
+                position += 1.0;
+            }
+        }
+        output
+    }
+
+    fn frame_cadence_total_samples(framesize: f64, num_frames: usize) -> usize {
+        let mut position: f64 = 0.0;
+        let mut frames_seen: usize = 0;
+        let mut samples: usize = 0;
+        loop {
+            if position.floor() == 0.0 {
+                frames_seen += 1;
+                if frames_seen > num_frames {
+                    return samples;
+                }
+            }
+            samples += 1;
+            if position >= framesize - 1.0 {
+                position -= framesize - 1.0;
+            } else {
+                position += 1.0;
+            }
+        }
+    }
 }
 
 impl Reim {
@@ -2493,6 +2565,10 @@ impl Reim {
         }
     }
 
+    pub fn analyze_to_frames(&mut self, samples: &[f64]) -> Vec<Frame> {
+        self.analyzer.analyze_to_frames(samples)
+    }
+
     /// Number of frames analyzed so far.
     pub fn frame_count(&self) -> u64 {
         self.analyzer.frame_count()
@@ -2554,6 +2630,16 @@ impl Reim {
     pub fn set_voicing_score_min(&mut self, min: f64) {
         self.analyzer.set_voicing_score_min(min);
     }
+}
+
+/// One analysis frame: the full WORLD parameter set at a single time step.
+#[derive(Clone)]
+pub struct Frame {
+    pub fo: f64,
+    pub voiced: bool,
+    pub silence: bool,
+    pub aperiodicity: Vec<f64>,
+    pub spectral_envelope: Vec<f64>,
 }
 
 // ============================================================================
@@ -2643,6 +2729,10 @@ pub fn write_wav_f32(path: &str, samples: &[f64], sample_rate: u32) -> Result<()
         out.extend_from_slice(&(s as f32).to_le_bytes());
     }
     std::fs::write(path, out).map_err(|e| format!("write {path}: {e}"))
+}
+
+pub fn write_wav(path: &str, data: &WavData) -> Result<(), String> {
+    write_wav_f32(path, &data.samples, data.sample_rate)
 }
 
 // ============================================================================
