@@ -308,6 +308,22 @@ F1 / recall / false-alarm (same protocol as above, PTDB at stride 5):
 marks voiced, so the printed contour reflects the full voicing logic, not just
 the raw tracker.
 
+**Offline pitch refinement** (`segment::refine_pitch`; default on for the
+offline CLI paths `f0` and `segment`, `REIM_PITCH_REFINE=0` disables; runs
+after `refine_voicing`). Fixes tracker pitch errors within each voiced run by
+rewriting `Frame::fo`: a three-state Viterbi over octave offsets corrects runs
+tracked at double or half the true pitch, and short non-octave excursions
+(formant/noise locks) are interpolated across in cents, or held at the nearest
+good value at run edges. Only bounded excursions are treated as errors —
+duration is the evidence, so a genuine sustained octave leap is preserved
+bit-identically, and a whole run tracked octave-wrong is left alone. With the
+current constants, interior octave-error runs up to 150 ms are corrected while
+level changes sustained past 75 ms count as music. Measured effect on the eval
+protocol above is small — Vocadito pooled RPA 0.941 -> 0.942 across noise
+conditions, PTDB unchanged — because the causal tracker's continuity seeding
+already keeps octave errors rare there; the pass exists for the runs that do
+slip through, and it never regressed a clip.
+
 **Soft voicing** (`Reim::set_soft_voicing(true)`, or `REIM_SOFT_VOICING=1`; off
 by default, departs from the C reference) replaces the binary pulse/noise flip
 at synthesis with a continuous mix: pulse energy scales with the fused

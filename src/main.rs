@@ -5,7 +5,7 @@
 //!   reim bench [in.wav]                        throughput + per-stage latency
 //!   reim f0 <in.wav> [fmin] [fmax] [fftsize]   emit the per-frame Fo contour as CSV
 
-use reim::segment::refine_voicing;
+use reim::segment::{refine_pitch, refine_voicing};
 use reim::{default_fftsize, read_wav, write_wav_f32, Frame, Reim};
 
 // Offline voicing refinement (segment::refine_voicing) is applied by default
@@ -13,6 +13,13 @@ use reim::{default_fftsize, read_wav, write_wav_f32, Frame, Reim};
 // it to get the raw causal per-frame decision.
 fn voicing_refine_enabled() -> bool {
     std::env::var("REIM_VOICING_REFINE").as_deref() != Ok("0")
+}
+
+// Same deal for offline pitch refinement (segment::refine_pitch);
+// REIM_PITCH_REFINE=0 disables it to get the raw tracker contour. Separate
+// gates so eval runs can attribute regressions to one stage.
+fn pitch_refine_enabled() -> bool {
+    std::env::var("REIM_PITCH_REFINE").as_deref() != Ok("0")
 }
 
 // Optional, EXPERIMENTAL: enable the voicing periodicity gate from the CLI via the
@@ -338,6 +345,9 @@ fn cmd_f0(
     if voicing_refine_enabled() {
         refine_voicing(&mut frames);
     }
+    if pitch_refine_enabled() {
+        refine_pitch(&mut frames);
+    }
     let mut out = String::new();
     for (t, f) in times.iter().zip(&frames) {
         // emit pitch only on voiced frames so the contour reflects the full
@@ -417,6 +427,9 @@ fn cmd_segment(input: &str, svg_output: Option<&str>) -> Result<(), String> {
     let mut frames = analyzer.analyze_to_frames(&wav.samples);
     if voicing_refine_enabled() {
         refine_voicing(&mut frames);
+    }
+    if pitch_refine_enabled() {
+        refine_pitch(&mut frames);
     }
     let config = reim::segment::SegmentConfig::default();
     let period_ms = 5.0;

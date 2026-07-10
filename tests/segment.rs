@@ -472,6 +472,37 @@ fn pitch_refine_respects_unvoiced_gap() {
 }
 
 #[test]
+fn pitch_refine_then_segment_e2e() {
+    let input = synthetic_input();
+    let mut analyzer = Analyzer::with_defaults(FS);
+    let mut frames = analyzer.analyze_to_frames(&input);
+    refine_voicing(&mut frames);
+    refine_pitch(&mut frames);
+
+    let segs = segment(&frames, 200.0, &SegmentConfig::default());
+    assert!(
+        segs.iter().any(|s| matches!(s.kind, SegmentKind::Note(_))),
+        "should detect at least one note"
+    );
+    assert!(
+        matches!(segs.last().unwrap().kind, SegmentKind::Unvoiced),
+        "trailing silence should stay unvoiced"
+    );
+
+    let edits: Vec<NoteEdit> = segs
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| matches!(s.kind, SegmentKind::Note(_)))
+        .map(|(i, _)| NoteEdit::identity(i))
+        .collect();
+    let rendered = render(&frames, &segs, &edits);
+    let mut synth = Synthesizer::with_defaults(FS);
+    let audio = synth.synthesize_frames(&rendered);
+    assert!(!audio.is_empty());
+    assert!(audio.iter().all(|s| s.is_finite()));
+}
+
+#[test]
 fn pitch_refine_interpolates_junk_run() {
     let mut frames: Vec<Frame> = (0..60).map(|_| pframe(220.0, true, false, 0.95)).collect();
     for f in &mut frames[25..30] {
