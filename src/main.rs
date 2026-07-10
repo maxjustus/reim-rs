@@ -414,7 +414,10 @@ fn cmd_segment(input: &str, svg_output: Option<&str>) -> Result<(), String> {
     let wav = read_wav(input)?;
     let fs = wav.sample_rate as f64;
     let mut analyzer = reim::Analyzer::with_defaults(fs);
-    let frames = analyzer.analyze_to_frames(&wav.samples);
+    let mut frames = analyzer.analyze_to_frames(&wav.samples);
+    if voicing_refine_enabled() {
+        refine_voicing(&mut frames);
+    }
     let config = reim::segment::SegmentConfig::default();
     let period_ms = 5.0;
     let frame_rate = 1000.0 / period_ms;

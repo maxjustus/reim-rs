@@ -288,8 +288,25 @@ beats it on speech (0.83 vs 0.79) while keeping RPA 0.76 vs 0.70 — one
 threshold now works across both domains. `Reim::last_voicing_score()` exposes
 the probability per frame; `reim features` dumps all voicing features as CSV.
 
-`reim f0` reports pitch only on frames this decision marks voiced, so the printed
-contour reflects the full voicing logic, not just the raw tracker.
+**Offline voicing refinement** (`segment::refine_voicing`; default on for the
+offline CLI paths `f0` and `segment`, `REIM_VOICING_REFINE=0` disables). When
+the whole file is available there is no reason to decide voicing causally: a
+two-state Viterbi smooths the per-frame fused probability
+(`Frame::voicing_score`) and rewrites `Frame::voiced` with the globally optimal
+path. Single-frame gate misfires mid-note are bridged (no spurious note splits
+in `segment`), short periodicity blips in breath noise are removed, and silence
+or fo=0 frames can never become voiced. Unlike the causal gate above it needs
+no threshold and sees future context; the streaming API is unaffected. Voicing
+F1 / recall / false-alarm (same protocol as above, PTDB at stride 5):
+
+| dataset          | refine off         | refined            |
+| ---------------- | ------------------ | ------------------ |
+| Vocadito (sung)  | 0.85 / 1.00 / 0.67 | 0.93 / 0.98 / 0.25 |
+| PTDB-TUG (speech)| 0.68 / 0.98 / 0.26 | 0.84 / 0.83 / 0.03 |
+
+`reim f0` reports pitch only on frames the (by default refined) voicing decision
+marks voiced, so the printed contour reflects the full voicing logic, not just
+the raw tracker.
 
 **Soft voicing** (`Reim::set_soft_voicing(true)`, or `REIM_SOFT_VOICING=1`; off
 by default, departs from the C reference) replaces the binary pulse/noise flip
