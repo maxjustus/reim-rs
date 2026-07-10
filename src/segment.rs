@@ -135,13 +135,29 @@ const UNITY: usize = 1;
 // Unity first so strict-< comparisons resolve every tie to "no correction".
 const STATE_ORDER: [usize; 3] = [UNITY, 0, 2];
 
+// A non-octave outlier (formant/noise lock) is recognized by shape, not by
+// distance from a reference: it is entered by a per-frame jump no legal
+// gesture makes (extreme vibrato ~25 cents/frame, portamento ~60, grace
+// notes <= ~300 cents) and it comes back — a genuine note step jumps and
+// stays, failing the return test. Run edges have no anchor on one side, so
+// junk there is held at the nearest good frame, never extrapolated; the
+// 4-frame edge zone is below min_note_frames, so nothing segmentable is
+// ever clamped. Edge clamps must see the raw contour: the octave pass can
+// half-fix edge junk (500 Hz on a 220 Hz note -> 250) and hide the jump.
+const OUTLIER_JUMP_CENTS: f64 = 350.0;
+const OUTLIER_RETURN_TOL_CENTS: f64 = 150.0;
+const OUTLIER_MAX_RUN: usize = 8;
+const OUTLIER_EDGE_RUN: usize = 4;
+
 /// Offline pitch-contour refinement: rewrites [`Frame::fo`] in place within
 /// each voiced run. A three-state Viterbi over octave offsets corrects runs
-/// tracked at double or half the true pitch. Only bounded excursions are
-/// treated as errors: a sustained level change (a genuine octave leap) is
-/// preserved, and a whole run tracked octave-wrong is indistinguishable from
-/// a real note and left alone. Run this after [`refine_voicing`], before
-/// [`segment`].
+/// tracked at double or half the true pitch; short non-octave excursions
+/// (formant/noise locks) are interpolated across in cents, or held at the
+/// nearest good value when they touch a run edge. Only bounded excursions
+/// are treated as errors: a sustained level change (a genuine octave leap)
+/// is preserved, and a whole run tracked octave-wrong is indistinguishable
+/// from a real note and left alone. Run this after [`refine_voicing`],
+/// before [`segment`].
 pub fn refine_pitch(frames: &mut [Frame]) {
     let mut i = 0;
     while i < frames.len() {
@@ -158,14 +174,85 @@ pub fn refine_pitch(frames: &mut [Frame]) {
 }
 
 fn refine_run(frames: &mut [Frame]) {
-    let cents: Vec<f64> = frames.iter().map(|f| hz_to_cents(f.fo)).collect();
-    for (f, s) in frames.iter_mut().zip(octave_states(&cents)) {
+    let mut cents: Vec<f64> = frames.iter().map(|f| hz_to_cents(f.fo)).collect();
+    let mut changed = edge_clamps(&mut cents);
+    for (i, s) in octave_states(&cents).into_iter().enumerate() {
         match s {
-            0 => f.fo *= 2.0,
-            2 => f.fo *= 0.5,
+            0 => {
+                frames[i].fo *= 2.0;
+                cents[i] += 1200.0;
+            }
+            2 => {
+                frames[i].fo *= 0.5;
+                cents[i] -= 1200.0;
+            }
             _ => {}
         }
     }
+    changed.extend(interior_lerp(&mut cents));
+    for i in changed {
+        frames[i].fo = cents_to_hz(cents[i]);
+    }
+}
+
+/// Hold junk at the run edges: everything before the last outlier jump in
+/// the first `OUTLIER_EDGE_RUN` frames (and after the first jump in the
+/// last), fixed in `cents`; returns the indices changed. Last/first jump —
+/// not first/last overall — so stacked junk clamps to the actual good value.
+fn edge_clamps(cents: &mut [f64]) -> Vec<usize> {
+    let n = cents.len();
+    let mut changed = Vec::new();
+    if n < 2 {
+        return changed;
+    }
+    if let Some(i) = (1..=OUTLIER_EDGE_RUN.min(n - 1))
+        .rev()
+        .find(|&i| (cents[i] - cents[i - 1]).abs() > OUTLIER_JUMP_CENTS)
+    {
+        for k in 0..i {
+            cents[k] = cents[i];
+            changed.push(k);
+        }
+    }
+    if let Some(k) = (n.saturating_sub(OUTLIER_EDGE_RUN).max(1)..n)
+        .find(|&k| (cents[k] - cents[k - 1]).abs() > OUTLIER_JUMP_CENTS)
+    {
+        for t in k..n {
+            cents[t] = cents[k - 1];
+            changed.push(t);
+        }
+    }
+    changed
+}
+
+/// Interpolate across interior outlier runs: entered by a jump beyond
+/// `OUTLIER_JUMP_CENTS`, at most `OUTLIER_MAX_RUN` frames, exited by a
+/// return to within `OUTLIER_RETURN_TOL_CENTS` of the pre-jump anchor.
+/// Fixes `cents` in place; returns the indices changed.
+fn interior_lerp(cents: &mut [f64]) -> Vec<usize> {
+    let n = cents.len();
+    let mut changed = Vec::new();
+    let mut i = 1;
+    while i < n {
+        if (cents[i] - cents[i - 1]).abs() > OUTLIER_JUMP_CENTS {
+            let end = (i + OUTLIER_MAX_RUN).min(n - 1);
+            if let Some(j) =
+                (i + 1..=end).find(|&j| (cents[j] - cents[i - 1]).abs() <= OUTLIER_RETURN_TOL_CENTS)
+            {
+                let a = cents[i - 1];
+                let b = cents[j];
+                let len = (j - i + 1) as f64;
+                for k in i..j {
+                    cents[k] = a + (b - a) * (k - i + 1) as f64 / len;
+                    changed.push(k);
+                }
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    changed
 }
 
 /// Viterbi over per-frame octave offsets: state `s` claims the tracker

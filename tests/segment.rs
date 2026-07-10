@@ -471,6 +471,65 @@ fn pitch_refine_respects_unvoiced_gap() {
     );
 }
 
+#[test]
+fn pitch_refine_interpolates_junk_run() {
+    let mut frames: Vec<Frame> = (0..60).map(|_| pframe(220.0, true, false, 0.95)).collect();
+    for f in &mut frames[25..30] {
+        f.fo = 800.0;
+    }
+    refine_pitch(&mut frames);
+    for (i, f) in frames.iter().enumerate() {
+        if (25..30).contains(&i) {
+            let err = (hz_to_cents(f.fo) - hz_to_cents(220.0)).abs();
+            assert!(
+                err < 0.5,
+                "frame {i}: junk should interpolate to ~220, off by {err} cents"
+            );
+        } else {
+            assert_eq!(f.fo, 220.0, "frame {i}: good frames must be untouched");
+        }
+    }
+}
+
+#[test]
+fn pitch_refine_clamps_junk_at_run_edges() {
+    let mut frames: Vec<Frame> = (0..40).map(|_| pframe(220.0, true, false, 0.95)).collect();
+    frames[0].fo = 500.0;
+    frames[1].fo = 500.0;
+    for f in &mut frames[37..40] {
+        f.fo = 617.0;
+    }
+    refine_pitch(&mut frames);
+    for (i, f) in frames.iter().enumerate() {
+        if (2..37).contains(&i) {
+            assert_eq!(f.fo, 220.0, "frame {i}: good frames must be untouched");
+        } else {
+            assert!(
+                (f.fo - 220.0).abs() < 1e-9,
+                "frame {i}: edge junk should hold the nearest good value, got {}",
+                f.fo
+            );
+        }
+    }
+}
+
+#[test]
+fn pitch_refine_preserves_grace_note_ornament() {
+    let mut frames: Vec<Frame> = (0..40).map(|_| pframe(220.0, true, false, 0.95)).collect();
+    let ornament = cents_to_hz(hz_to_cents(220.0) + 300.0);
+    for f in &mut frames[20..26] {
+        f.fo = ornament;
+    }
+    let original: Vec<f64> = frames.iter().map(|f| f.fo).collect();
+    refine_pitch(&mut frames);
+    for (i, (f, o)) in frames.iter().zip(&original).enumerate() {
+        assert_eq!(
+            f.fo, *o,
+            "frame {i}: a 300-cent ornament is music, not junk"
+        );
+    }
+}
+
 // --- decompose_contour tests ---
 
 const FRAME_RATE: f64 = 200.0;
