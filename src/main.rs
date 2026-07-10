@@ -5,7 +5,15 @@
 //!   reim bench [in.wav]                        throughput + per-stage latency
 //!   reim f0 <in.wav> [fmin] [fmax] [fftsize]   emit the per-frame Fo contour as CSV
 
-use reim::{default_fftsize, read_wav, write_wav_f32, Reim};
+use reim::segment::refine_voicing;
+use reim::{default_fftsize, read_wav, write_wav_f32, Frame, Reim};
+
+// Offline voicing refinement (segment::refine_voicing) is applied by default
+// on the offline CLI paths (`f0`, `segment`); REIM_VOICING_REFINE=0 disables
+// it to get the raw causal per-frame decision.
+fn voicing_refine_enabled() -> bool {
+    std::env::var("REIM_VOICING_REFINE").as_deref() != Ok("0")
+}
 
 // Optional, EXPERIMENTAL: enable the voicing periodicity gate from the CLI via the
 // REIM_VOICING_SCORE_MIN env var — a fused voicing probability threshold in (0,1),
@@ -289,7 +297,9 @@ fn cmd_bench(input: Option<&str>) -> Result<(), String> {
 // Emit the per-frame Fo contour as CSV: "time_seconds,fo_hz" (fo 0.0 = unvoiced).
 // time is the analysis-window center, so the contour aligns with the audio it
 // describes. fftsize defaults to the sample-rate-aware default (1024 at 16 kHz,
-// 2048 at 24-48 kHz) and can be overridden as the 4th positional arg.
+// 2048 at 24-48 kHz) and can be overridden as the 4th positional arg. Voicing
+// is the offline-refined decision by default (REIM_VOICING_REFINE=0 for the
+// raw causal one).
 fn cmd_f0(
     input: &str,
     fmin: Option<&str>,
@@ -308,21 +318,32 @@ fn cmd_f0(
     apply_voicing_env(&mut reim);
     let half = fftsize as f64 / 2.0;
     let mut last = 0u64;
-    let mut out = String::new();
+    let mut times = Vec::new();
+    let mut frames = Vec::new();
     for (i, &x) in wav.samples.iter().enumerate() {
         reim.process_sample(x);
         if reim.frame_count() != last {
             last = reim.frame_count();
-            let t = ((i as f64 - half) / fs).max(0.0);
-            // emit pitch only on voiced frames so the contour reflects the full
-            // voicing decision (incl. the sub-fundamental rumble guard), not just analyze_fo
-            let fo = if reim.last_voiced() {
-                reim.last_fo()
-            } else {
-                0.0
-            };
-            out.push_str(&format!("{t:.6},{fo:.4}\n"));
+            times.push(((i as f64 - half) / fs).max(0.0));
+            frames.push(Frame {
+                fo: reim.last_fo(),
+                voiced: reim.last_voiced(),
+                silence: reim.last_silence(),
+                voicing_score: reim.last_voicing_score(),
+                aperiodicity: vec![],
+                spectral_envelope: vec![],
+            });
         }
+    }
+    if voicing_refine_enabled() {
+        refine_voicing(&mut frames);
+    }
+    let mut out = String::new();
+    for (t, f) in times.iter().zip(&frames) {
+        // emit pitch only on voiced frames so the contour reflects the full
+        // voicing decision (incl. the sub-fundamental rumble guard), not just analyze_fo
+        let fo = if f.voiced { f.fo } else { 0.0 };
+        out.push_str(&format!("{t:.6},{fo:.4}\n"));
     }
     print!("{out}");
     Ok(())
