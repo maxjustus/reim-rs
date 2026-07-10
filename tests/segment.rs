@@ -1,6 +1,6 @@
 use reim::segment::{
-    cents_to_hz, clean_contour, contour_svg, decompose_contour, hz_to_cents, render, segment,
-    NoteEdit, SegmentConfig, SegmentKind,
+    cents_to_hz, clean_contour, contour_svg, decompose_contour, hz_to_cents, refine_voicing,
+    render, segment, NoteEdit, SegmentConfig, SegmentKind,
 };
 use reim::{write_wav, Analyzer, Frame, Reim, Synthesizer, WavData};
 use rustfft::FftPlanner;
@@ -245,6 +245,130 @@ fn segment_voiced_silence_voiced() {
     assert!(matches!(segs[0].kind, SegmentKind::Note(_)));
     assert!(matches!(segs[1].kind, SegmentKind::Unvoiced));
     assert!(matches!(segs[2].kind, SegmentKind::Note(_)));
+}
+
+// --- refine_voicing tests ---
+
+fn pframe(fo: f64, voiced: bool, silence: bool, voicing_score: f64) -> Frame {
+    Frame {
+        fo,
+        voiced,
+        silence,
+        voicing_score,
+        aperiodicity: vec![],
+        spectral_envelope: vec![],
+    }
+}
+
+#[test]
+fn refine_empty_and_all_unvoiced_unchanged() {
+    let mut empty: Vec<Frame> = vec![];
+    refine_voicing(&mut empty);
+    assert!(empty.is_empty());
+
+    let mut frames: Vec<Frame> = (0..30).map(|_| pframe(150.0, false, false, 0.05)).collect();
+    refine_voicing(&mut frames);
+    assert!(frames.iter().all(|f| !f.voiced));
+}
+
+#[test]
+fn refine_never_voices_silence_or_zero_fo() {
+    let mut silent: Vec<Frame> = (0..20).map(|_| pframe(200.0, false, true, 0.95)).collect();
+    refine_voicing(&mut silent);
+    assert!(
+        silent.iter().all(|f| !f.voiced),
+        "silence must stay unvoiced"
+    );
+
+    let mut no_pitch: Vec<Frame> = (0..20).map(|_| pframe(0.0, false, false, 0.95)).collect();
+    refine_voicing(&mut no_pitch);
+    assert!(
+        no_pitch.iter().all(|f| !f.voiced),
+        "fo == 0 must stay unvoiced"
+    );
+}
+
+#[test]
+fn refine_bridges_single_frame_gate_dropout() {
+    let mut frames: Vec<Frame> = (0..30).map(|_| pframe(200.0, true, false, 0.95)).collect();
+    frames[15] = pframe(200.0, false, false, 0.4);
+    refine_voicing(&mut frames);
+    assert!(
+        frames.iter().all(|f| f.voiced),
+        "single-frame gate misfire mid-note should be bridged"
+    );
+
+    let segs = segment(&frames, 200.0, &SegmentConfig::default());
+    assert_eq!(segs.len(), 1, "refined track should segment as one note");
+    assert!(matches!(segs[0].kind, SegmentKind::Note(_)));
+}
+
+#[test]
+fn refine_removes_isolated_voiced_blip_in_noise() {
+    let mut frames: Vec<Frame> = (0..30).map(|_| pframe(150.0, false, false, 0.05)).collect();
+    frames[14] = pframe(200.0, true, false, 0.9);
+    frames[15] = pframe(200.0, true, false, 0.9);
+    refine_voicing(&mut frames);
+    assert!(
+        frames.iter().all(|f| !f.voiced),
+        "short voiced blip in noise should be removed"
+    );
+}
+
+#[test]
+fn refine_preserves_genuine_unvoiced_consonant() {
+    let mut frames: Vec<Frame> = Vec::new();
+    frames.extend((0..40).map(|_| pframe(200.0, true, false, 0.95)));
+    frames.extend((0..12).map(|_| pframe(180.0, false, false, 0.05)));
+    frames.extend((0..40).map(|_| pframe(200.0, true, false, 0.95)));
+    refine_voicing(&mut frames);
+
+    assert!(frames[..38].iter().all(|f| f.voiced));
+    assert!(
+        frames[42..50].iter().all(|f| !f.voiced),
+        "a 60 ms unvoiced consonant must survive smoothing"
+    );
+    assert!(frames[54..].iter().all(|f| f.voiced));
+}
+
+#[test]
+fn refine_keeps_sustained_gate_rejection_unvoiced() {
+    let mut frames: Vec<Frame> = (0..30).map(|_| pframe(100.0, false, false, 0.6)).collect();
+    refine_voicing(&mut frames);
+    assert!(
+        frames.iter().all(|f| !f.voiced),
+        "sustained gate rejection (rumble) must stay unvoiced"
+    );
+}
+
+#[test]
+fn refine_then_segment_e2e() {
+    let input = synthetic_input();
+    let mut analyzer = Analyzer::with_defaults(FS);
+    let mut frames = analyzer.analyze_to_frames(&input);
+    refine_voicing(&mut frames);
+
+    let segs = segment(&frames, 200.0, &SegmentConfig::default());
+    assert!(
+        segs.iter().any(|s| matches!(s.kind, SegmentKind::Note(_))),
+        "should detect at least one note"
+    );
+    assert!(
+        matches!(segs.last().unwrap().kind, SegmentKind::Unvoiced),
+        "trailing silence should stay unvoiced"
+    );
+
+    let edits: Vec<NoteEdit> = segs
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| matches!(s.kind, SegmentKind::Note(_)))
+        .map(|(i, _)| NoteEdit::identity(i))
+        .collect();
+    let rendered = render(&frames, &segs, &edits);
+    let mut synth = Synthesizer::with_defaults(FS);
+    let audio = synth.synthesize_frames(&rendered);
+    assert!(!audio.is_empty());
+    assert!(audio.iter().all(|s| s.is_finite()));
 }
 
 // --- decompose_contour tests ---

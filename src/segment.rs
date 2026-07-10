@@ -41,6 +41,79 @@ pub fn clean_contour(frames: &[Frame], median_window: usize) -> Vec<f64> {
     result
 }
 
+// Internal, eval-tunable (like FUSION_WEIGHTS). At the 200 Hz frame rate the
+// switch cost (ln(0.01/0.99) ≈ -4.6 nats, -9.2 for a dip-and-return) bridges
+// 1-4 frame gaps of contrary evidence but lets a genuine unvoiced consonant
+// (30-80 ms) win by frame 4-5. The clamp caps per-frame evidence at ±6.9
+// nats so one frame can never beat two switches. The gate leak (-1.9 nats)
+// makes a causal hard-gate rejection a penalty rather than a veto: break-even
+// probability ≈ 0.87, so sustained rumble stays unvoiced while single-frame
+// gate misfires mid-note get bridged.
+const REFINE_P_STAY: f64 = 0.99;
+const REFINE_GATE_LEAK: f64 = 0.15;
+const REFINE_PROB_CLAMP: f64 = 1e-3;
+
+/// Offline voiced/unvoiced smoothing over the whole frame track: a two-state
+/// Viterbi pass over the per-frame [`Frame::voicing_score`] that rewrites
+/// [`Frame::voiced`] with the globally optimal path. Unlike the causal
+/// per-frame decision it sees future context, so single-frame gate misfires
+/// mid-note are bridged (no spurious note splits) and short periodicity blips
+/// in breath noise are removed. Silence and `fo == 0` frames can never become
+/// voiced. Run this before [`segment`] on offline material.
+pub fn refine_voicing(frames: &mut [Frame]) {
+    if frames.is_empty() {
+        return;
+    }
+    let ln_stay = REFINE_P_STAY.ln();
+    let ln_switch = (1.0 - REFINE_P_STAY).ln();
+    let ln_leak = REFINE_GATE_LEAK.ln();
+
+    // Log-emissions for (unvoiced, voiced) at one frame.
+    let emit = |f: &Frame| -> (f64, f64) {
+        let p = f
+            .voicing_score
+            .clamp(REFINE_PROB_CLAMP, 1.0 - REFINE_PROB_CLAMP);
+        let l_uv = (1.0 - p).ln();
+        let l_v = if f.silence || f.fo <= 0.0 {
+            f64::NEG_INFINITY
+        } else if f.voiced {
+            p.ln()
+        } else {
+            p.ln() + ln_leak
+        };
+        (l_uv, l_v)
+    };
+
+    // Forward pass: best path log-score ending unvoiced/voiced, plus the
+    // predecessor state chosen for each (false = unvoiced, true = voiced).
+    let (mut best_uv, mut best_v) = emit(&frames[0]);
+    let mut back: Vec<(bool, bool)> = Vec::with_capacity(frames.len());
+    back.push((false, true));
+    for f in &frames[1..] {
+        let (e_uv, e_v) = emit(f);
+        let (from_uv, to_uv) = if best_uv + ln_stay >= best_v + ln_switch {
+            (false, best_uv + ln_stay)
+        } else {
+            (true, best_v + ln_switch)
+        };
+        let (from_v, to_v) = if best_v + ln_stay >= best_uv + ln_switch {
+            (true, best_v + ln_stay)
+        } else {
+            (false, best_uv + ln_switch)
+        };
+        best_uv = to_uv + e_uv;
+        best_v = to_v + e_v;
+        back.push((from_uv, from_v));
+    }
+
+    let mut voiced = best_v > best_uv;
+    for i in (0..frames.len()).rev() {
+        frames[i].voiced = voiced;
+        let (from_uv, from_v) = back[i];
+        voiced = if voiced { from_v } else { from_uv };
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SegmentConfig {
     pub stability_cents: f64,
