@@ -19,6 +19,7 @@ fn main() {
                 fo: 220.0 * 2.0_f64.powf(vib / 1200.0),
                 voiced: true,
                 silence: false,
+                voicing_score: 1.0,
                 aperiodicity: vec![0.1; 8],
                 spectral_envelope: vec![1.0; 8],
             }

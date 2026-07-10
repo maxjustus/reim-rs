@@ -2398,6 +2398,7 @@ impl Analyzer {
                     fo: self.fo(),
                     voiced: self.voiced(),
                     silence: self.silence(),
+                    voicing_score: self.voicing_score(),
                     aperiodicity: self.aperiodicity().to_vec(),
                     spectral_envelope: self.spectral_envelope().to_vec(),
                 });
@@ -2675,6 +2676,10 @@ pub struct Frame {
     pub fo: f64,
     pub voiced: bool,
     pub silence: bool,
+    /// Pre-gate fused voicing probability in (0,1) (see
+    /// [`Analyzer::voicing_score`]); meaningful even when `voiced` is false
+    /// or `silence` is true.
+    pub voicing_score: f64,
     pub aperiodicity: Vec<f64>,
     pub spectral_envelope: Vec<f64>,
 }

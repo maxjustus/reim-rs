@@ -78,6 +78,7 @@ fn clean_contour_suppresses_octave_jump() {
             fo: if i == 5 { 400.0 } else { 200.0 },
             voiced: true,
             silence: false,
+            voicing_score: 1.0,
             aperiodicity: vec![],
             spectral_envelope: vec![],
         })
@@ -98,6 +99,7 @@ fn clean_contour_passes_constant_pitch() {
             fo: 300.0,
             voiced: true,
             silence: false,
+            voicing_score: 1.0,
             aperiodicity: vec![],
             spectral_envelope: vec![],
         })
@@ -115,6 +117,7 @@ fn clean_contour_unvoiced_zero() {
             fo: 0.0,
             voiced: false,
             silence: true,
+            voicing_score: 0.0,
             aperiodicity: vec![],
             spectral_envelope: vec![],
         })
@@ -133,6 +136,7 @@ fn hz_cents_roundtrip() {
             fo: freq,
             voiced: true,
             silence: false,
+            voicing_score: 1.0,
             aperiodicity: vec![],
             spectral_envelope: vec![],
         }];
@@ -148,6 +152,7 @@ fn segment_constant_pitch_single_note() {
             fo: 200.0,
             voiced: true,
             silence: false,
+            voicing_score: 1.0,
             aperiodicity: vec![],
             spectral_envelope: vec![],
         })
@@ -167,6 +172,7 @@ fn segment_step_change_two_notes() {
                 fo,
                 voiced: true,
                 silence: false,
+                voicing_score: 1.0,
                 aperiodicity: vec![],
                 spectral_envelope: vec![],
             }
@@ -191,6 +197,7 @@ fn segment_silence_is_unvoiced() {
             fo: 0.0,
             voiced: false,
             silence: true,
+            voicing_score: 0.0,
             aperiodicity: vec![],
             spectral_envelope: vec![],
         })
@@ -208,6 +215,7 @@ fn segment_voiced_silence_voiced() {
             fo: 200.0,
             voiced: true,
             silence: false,
+            voicing_score: 1.0,
             aperiodicity: vec![],
             spectral_envelope: vec![],
         });
@@ -217,6 +225,7 @@ fn segment_voiced_silence_voiced() {
             fo: 0.0,
             voiced: false,
             silence: true,
+            voicing_score: 0.0,
             aperiodicity: vec![],
             spectral_envelope: vec![],
         });
@@ -226,6 +235,7 @@ fn segment_voiced_silence_voiced() {
             fo: 200.0,
             voiced: true,
             silence: false,
+            voicing_score: 1.0,
             aperiodicity: vec![],
             spectral_envelope: vec![],
         });
@@ -422,6 +432,7 @@ fn contour_svg_structural() {
                     fo: 220.0,
                     voiced: true,
                     silence: false,
+                    voicing_score: 1.0,
                     aperiodicity: vec![],
                     spectral_envelope: vec![],
                 }
@@ -430,6 +441,7 @@ fn contour_svg_structural() {
                     fo: 0.0,
                     voiced: false,
                     silence: true,
+                    voicing_score: 0.0,
                     aperiodicity: vec![],
                     spectral_envelope: vec![],
                 }
@@ -438,6 +450,7 @@ fn contour_svg_structural() {
                     fo: 330.0,
                     voiced: true,
                     silence: false,
+                    voicing_score: 1.0,
                     aperiodicity: vec![],
                     spectral_envelope: vec![],
                 }
@@ -465,6 +478,7 @@ fn voiced_frame(fo: f64) -> Frame {
         fo,
         voiced: true,
         silence: false,
+        voicing_score: 1.0,
         aperiodicity: vec![0.1; 10],
         spectral_envelope: vec![1.0; 10],
     }
@@ -684,6 +698,7 @@ fn scoop_input() -> Vec<Frame> {
             fo: 0.0,
             voiced: false,
             silence: true,
+            voicing_score: 0.0,
             aperiodicity: vec![0.1; 10],
             spectral_envelope: vec![1.0; 10],
         })
@@ -896,7 +911,11 @@ fn render_lead_gap_inserts_silence() {
     }
     // Content after the gap is unchanged relative to the no-gap render.
     let baseline = render(&frames, &segs, &[]);
-    for (i, (a, b)) in baseline[a_len..].iter().zip(&rendered[a_len + 10..]).enumerate() {
+    for (i, (a, b)) in baseline[a_len..]
+        .iter()
+        .zip(&rendered[a_len + 10..])
+        .enumerate()
+    {
         assert_eq!(a.fo, b.fo, "fo mismatch at post-gap frame {i}");
     }
 }
@@ -990,6 +1009,7 @@ fn render_identity_preserves_frames() {
             fo: 200.0 + i as f64,
             voiced: true,
             silence: false,
+            voicing_score: 1.0,
             aperiodicity: vec![0.1; 10],
             spectral_envelope: vec![1.0; 10],
         })
@@ -1020,6 +1040,7 @@ fn render_pitch_correction() {
             fo: 220.0,
             voiced: true,
             silence: false,
+            voicing_score: 1.0,
             aperiodicity: vec![0.1; 10],
             spectral_envelope: vec![1.0; 10],
         })
@@ -1053,6 +1074,7 @@ fn render_vibrato_removal() {
                 fo: 440.0 * 2.0_f64.powf(vib / 1200.0),
                 voiced: true,
                 silence: false,
+                voicing_score: 1.0,
                 aperiodicity: vec![0.1; 10],
                 spectral_envelope: vec![1.0; 10],
             }
@@ -1090,6 +1112,7 @@ fn render_time_stretch() {
             fo: 300.0,
             voiced: true,
             silence: false,
+            voicing_score: 1.0,
             aperiodicity: vec![0.1; 10],
             spectral_envelope: vec![1.0; 10],
         })

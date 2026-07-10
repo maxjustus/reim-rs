@@ -794,6 +794,7 @@ fn interp_frame(fa: &Frame, fb: &Frame, t: f64, fo: f64) -> Frame {
         fo,
         voiced: nearest.voiced,
         silence: nearest.silence,
+        voicing_score: nearest.voicing_score,
         aperiodicity,
         spectral_envelope,
     }
@@ -895,6 +896,7 @@ pub fn render(frames: &[Frame], segments: &[Segment], edits: &[NoteEdit]) -> Vec
                         fo: 0.0,
                         voiced: false,
                         silence: true,
+                        voicing_score: 0.0,
                         ..frames[seg.frames.start].clone()
                     };
                     output.extend(std::iter::repeat_n(gap_frame, edit.lead_gap_frames));
