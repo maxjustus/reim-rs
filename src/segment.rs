@@ -114,6 +114,111 @@ pub fn refine_voicing(frames: &mut [Frame]) {
     }
 }
 
+// Internal, eval-tunable (like REFINE_*). Costs are in nats over the cents
+// contour at the 200 Hz frame rate. Duration is the only local evidence
+// separating a tracker octave error from a genuine octave leap: an error is
+// bounded (jump and jump back), a leap is sustained. Keeping an interior
+// error costs two octave discontinuities (2 * 1200 * 0.005 = 12.0 nats);
+// correcting it costs two switches plus the per-frame prior, so runs up to
+// (12.0 - 3.0) / 0.3 = 30 frames (150 ms) get fixed. Flattening a genuine
+// leap saves one discontinuity (6.0) but pays the prior for as long as the
+// note is held, so leaps sustained past (6.0 - 1.5) / 0.3 = 15 frames
+// (75 ms) are preserved. The transition clamp caps one frame's evidence at
+// 8.0 nats so a single junk frame can never outvote the accumulated prior.
+const OCT_STATE_OFFSETS: [f64; 3] = [-1200.0, 0.0, 1200.0];
+const OCT_COST_PER_CENT: f64 = 0.005;
+const OCT_TRANS_CLAMP_CENTS: f64 = 1600.0;
+const OCT_SWITCH_COST: f64 = 1.5;
+const OCT_ERROR_PRIOR_PER_FRAME: f64 = 0.30;
+
+const UNITY: usize = 1;
+// Unity first so strict-< comparisons resolve every tie to "no correction".
+const STATE_ORDER: [usize; 3] = [UNITY, 0, 2];
+
+/// Offline pitch-contour refinement: rewrites [`Frame::fo`] in place within
+/// each voiced run. A three-state Viterbi over octave offsets corrects runs
+/// tracked at double or half the true pitch. Only bounded excursions are
+/// treated as errors: a sustained level change (a genuine octave leap) is
+/// preserved, and a whole run tracked octave-wrong is indistinguishable from
+/// a real note and left alone. Run this after [`refine_voicing`], before
+/// [`segment`].
+pub fn refine_pitch(frames: &mut [Frame]) {
+    let mut i = 0;
+    while i < frames.len() {
+        if !(frames[i].voiced && frames[i].fo > 0.0) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < frames.len() && frames[i].voiced && frames[i].fo > 0.0 {
+            i += 1;
+        }
+        refine_run(&mut frames[start..i]);
+    }
+}
+
+fn refine_run(frames: &mut [Frame]) {
+    let cents: Vec<f64> = frames.iter().map(|f| hz_to_cents(f.fo)).collect();
+    for (f, s) in frames.iter_mut().zip(octave_states(&cents)) {
+        match s {
+            0 => f.fo *= 2.0,
+            2 => f.fo *= 0.5,
+            _ => {}
+        }
+    }
+}
+
+/// Viterbi over per-frame octave offsets: state `s` claims the tracker
+/// reported `OCT_STATE_OFFSETS[s]` cents away from the true contour, so the
+/// corrected value is `cents[i] - offset`. Transition cost is the corrected
+/// contour's discontinuity — vibrato and glides cost every path equally.
+fn octave_states(cents: &[f64]) -> Vec<usize> {
+    let n = cents.len();
+    if n < 2 {
+        return vec![UNITY; n];
+    }
+    let prior = |s: usize| {
+        if s == UNITY {
+            0.0
+        } else {
+            OCT_ERROR_PRIOR_PER_FRAME
+        }
+    };
+    let mut cost = [prior(0), prior(1), prior(2)];
+    let mut back = vec![[UNITY; 3]; n];
+    for i in 1..n {
+        let mut next = [f64::INFINITY; 3];
+        for &s in &STATE_ORDER {
+            for &sp in &STATE_ORDER {
+                let step = ((cents[i] - OCT_STATE_OFFSETS[s])
+                    - (cents[i - 1] - OCT_STATE_OFFSETS[sp]))
+                    .abs()
+                    .min(OCT_TRANS_CLAMP_CENTS)
+                    * OCT_COST_PER_CENT;
+                let switch = if s == sp { 0.0 } else { OCT_SWITCH_COST };
+                let c = cost[sp] + step + switch + prior(s);
+                if c < next[s] {
+                    next[s] = c;
+                    back[i][s] = sp;
+                }
+            }
+        }
+        cost = next;
+    }
+    let mut s = UNITY;
+    for &cand in &STATE_ORDER {
+        if cost[cand] < cost[s] {
+            s = cand;
+        }
+    }
+    let mut states = vec![UNITY; n];
+    for i in (0..n).rev() {
+        states[i] = s;
+        s = back[i][s];
+    }
+    states
+}
+
 #[derive(Clone, Debug)]
 pub struct SegmentConfig {
     pub stability_cents: f64,

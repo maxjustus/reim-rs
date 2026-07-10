@@ -1,6 +1,6 @@
 use reim::segment::{
-    cents_to_hz, clean_contour, contour_svg, decompose_contour, hz_to_cents, refine_voicing,
-    render, segment, NoteEdit, SegmentConfig, SegmentKind,
+    cents_to_hz, clean_contour, contour_svg, decompose_contour, hz_to_cents, refine_pitch,
+    refine_voicing, render, segment, NoteEdit, SegmentConfig, SegmentKind,
 };
 use reim::{write_wav, Analyzer, Frame, Reim, Synthesizer, WavData};
 use rustfft::FftPlanner;
@@ -369,6 +369,106 @@ fn refine_then_segment_e2e() {
     let audio = synth.synthesize_frames(&rendered);
     assert!(!audio.is_empty());
     assert!(audio.iter().all(|s| s.is_finite()));
+}
+
+// --- refine_pitch tests ---
+
+#[test]
+fn pitch_refine_empty_and_constant_unchanged() {
+    let mut empty: Vec<Frame> = vec![];
+    refine_pitch(&mut empty);
+    assert!(empty.is_empty());
+
+    let mut frames: Vec<Frame> = (0..50).map(|_| pframe(220.0, true, false, 0.95)).collect();
+    refine_pitch(&mut frames);
+    assert!(frames.iter().all(|f| f.fo == 220.0));
+}
+
+#[test]
+fn pitch_refine_fixes_bounded_octave_run() {
+    let mut frames: Vec<Frame> = (0..60).map(|_| pframe(220.0, true, false, 0.95)).collect();
+    for f in &mut frames[20..30] {
+        f.fo = 440.0;
+    }
+    refine_pitch(&mut frames);
+    assert!(
+        frames.iter().all(|f| f.fo == 220.0),
+        "octave-doubled run should be halved exactly"
+    );
+
+    let mut frames: Vec<Frame> = (0..60).map(|_| pframe(220.0, true, false, 0.95)).collect();
+    for f in &mut frames[20..30] {
+        f.fo = 110.0;
+    }
+    refine_pitch(&mut frames);
+    assert!(
+        frames.iter().all(|f| f.fo == 220.0),
+        "octave-halved run should be doubled exactly"
+    );
+}
+
+#[test]
+fn pitch_refine_fixes_octave_error_at_run_start() {
+    let mut frames: Vec<Frame> = (0..60).map(|_| pframe(220.0, true, false, 0.95)).collect();
+    for f in &mut frames[..8] {
+        f.fo = 440.0;
+    }
+    refine_pitch(&mut frames);
+    assert!(
+        frames.iter().all(|f| f.fo == 220.0),
+        "head octave error should be fixed with no left anchor"
+    );
+}
+
+#[test]
+fn pitch_refine_preserves_genuine_octave_leap() {
+    let mut frames: Vec<Frame> = Vec::new();
+    frames.extend((0..40).map(|_| pframe(220.0, true, false, 0.95)));
+    frames.extend((0..40).map(|_| pframe(440.0, true, false, 0.95)));
+    refine_pitch(&mut frames);
+    assert!(frames[..40].iter().all(|f| f.fo == 220.0));
+    assert!(
+        frames[40..].iter().all(|f| f.fo == 440.0),
+        "a sustained octave leap is music, not an error"
+    );
+}
+
+#[test]
+fn pitch_refine_preserves_octave_leap_with_vibrato() {
+    let pi = std::f64::consts::PI;
+    let mut frames: Vec<Frame> = (0..80)
+        .map(|i| {
+            let base = if i < 40 { 220.0 } else { 440.0 };
+            let c = hz_to_cents(base) + 50.0 * (2.0 * pi * 5.5 * i as f64 / 200.0).sin();
+            pframe(cents_to_hz(c), true, false, 0.95)
+        })
+        .collect();
+    let original: Vec<f64> = frames.iter().map(|f| f.fo).collect();
+    refine_pitch(&mut frames);
+    for (i, (f, o)) in frames.iter().zip(&original).enumerate() {
+        assert_eq!(
+            f.fo, *o,
+            "frame {i}: vibrato + octave leap must be untouched"
+        );
+    }
+}
+
+#[test]
+fn pitch_refine_respects_unvoiced_gap() {
+    let mut frames: Vec<Frame> = Vec::new();
+    frames.extend((0..20).map(|_| pframe(220.0, true, false, 0.95)));
+    frames.extend((0..10).map(|_| pframe(350.0, false, false, 0.05)));
+    frames.extend((0..20).map(|_| pframe(440.0, true, false, 0.95)));
+    refine_pitch(&mut frames);
+    assert!(frames[..20].iter().all(|f| f.fo == 220.0));
+    assert!(
+        frames[20..30].iter().all(|f| f.fo == 350.0),
+        "unvoiced frames must be untouched"
+    );
+    assert!(
+        frames[30..].iter().all(|f| f.fo == 440.0),
+        "no continuity leak across an unvoiced gap"
+    );
 }
 
 // --- decompose_contour tests ---
