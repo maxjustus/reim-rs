@@ -69,7 +69,7 @@ CONDITIONS = [
 ]
 BABBLE_TALKERS = 3
 PAD_S = 0.25  # target file kept around its active span
-LEAD_RANGE_S = (0.5, 1.0)  # head start of whichever voice speaks first
+LEAD_RANGE_S = (0.5, 1.0)  # talker: after the target's active span starts; ahead/babble: target window start
 GAP_RANGE_S = (0.1, 0.4)  # pause between an interferer's consecutive utterances
 MIN_ACTIVE_S, MAX_DURATION_S = 2.5, 8.0
 MIN_VOICED_FRAMES = 100
@@ -355,20 +355,18 @@ def mixture_sha256(y):
 
 def render():
     failures = 0
-    checked = {}
+    hashes = {}
     for split in SPLITS:
         out_dir = DATA / "mix" / split
         out_dir.mkdir(parents=True, exist_ok=True)
         for line in (HERE / "manifest" / f"{split}.jsonl").read_text().splitlines():
             m = json.loads(line)
             for source, digest, ref_digest in sources_of(m):
-                if source not in checked:
-                    checked[source] = file_sha256(source_path(source)) == digest and (
-                        ref_digest is None or ref_sha256(source) == ref_digest
-                    )
-                    if not checked[source]:
-                        print(f"SOURCE MISMATCH {source}", flush=True)
-                        failures += 1
+                if source not in hashes:
+                    hashes[source] = (file_sha256(source_path(source)), ref_sha256(source) if ref_digest else None)
+                if hashes[source] != (digest, ref_digest):
+                    print(f"SOURCE MISMATCH {m['id']} {source}", flush=True)
+                    failures += 1
             y = mix(m) * m["out_gain"]
             ok = mixture_sha256(y) == m["sha256"]
             failures += not ok
