@@ -123,16 +123,26 @@ def clip_metrics(refs, est_t, est_f):
 
 
 def sample_nearest(t, f, grid, max_dt):
-    """Value of the nearest frame in (t, f) at each grid time; 0 when none is within max_dt."""
+    """Value of the nearest frame in (t, f) at each grid time; 0 when none is within max_dt.
+
+    Times are compared in whole microseconds, so a tie is exact and goes to the
+    earlier frame. Of several rows with one time stamp, the last row counts."""
     if len(t) == 0:
         return np.zeros(len(grid))
+    t, grid, max_dt = microseconds(t), microseconds(grid), microseconds(max_dt)
     order = np.argsort(t, kind="stable")
-    t, f = t[order], f[order]
+    t, f = t[order], np.asarray(f)[order]
+    last = np.append(t[1:] != t[:-1], True)
+    t, f = t[last], f[last]
     right = np.clip(np.searchsorted(t, grid), 0, len(t) - 1)
     left = np.clip(right - 1, 0, len(t) - 1)
     i = np.where(np.abs(grid - t[left]) <= np.abs(t[right] - grid), left, right)
     out = np.where(np.abs(t[i] - grid) <= max_dt, f[i], 0.0)
     return np.maximum(out, 0.0)
+
+
+def microseconds(seconds):
+    return np.round(np.asarray(seconds, dtype=np.float64) * 1e6).astype(np.int64)
 
 
 def ratio(num, den):
@@ -238,6 +248,11 @@ def self_test():
     sparse = clip_metrics(refs, t[::4] + 0.002, target[::4])
     near = np.arange(len(t)) % 4 < 2
     assert np.isclose(sparse["vr"], (t_voiced & near).sum() / t_voiced.sum()), sparse
+    # A grid time exactly between two frames takes the earlier one; a repeated
+    # time stamp takes the last row.
+    grid = np.array([0.010])
+    assert sample_nearest(np.array([0.005, 0.015]), np.array([100.0, 200.0]), grid, MAX_EST_DT)[0] == 100.0
+    assert sample_nearest(np.array([0.010, 0.010]), np.array([100.0, 200.0]), grid, MAX_EST_DT)[0] == 200.0
     print("score self-test PASSED")
     return 0
 
