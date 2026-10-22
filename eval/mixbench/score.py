@@ -22,6 +22,7 @@ import json
 import math
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -84,10 +85,11 @@ def read_prediction(path):
     with open(path) as fh:
         for row in csv.reader(fh):
             try:
-                t.append(float(row[0]))
-                f.append(float(row[1]))
+                time, f0 = float(row[0]), float(row[1])
             except (ValueError, IndexError):
                 continue
+            t.append(time)
+            f.append(f0)
     return np.array(t), np.array(f)
 
 
@@ -303,6 +305,12 @@ def self_test():
     grid = np.array([0.010])
     assert sample_nearest(np.array([0.005, 0.015]), np.array([100.0, 200.0]), grid, MAX_EST_DT)[0] == 100.0
     assert sample_nearest(np.array([0.010, 0.010]), np.array([100.0, 200.0]), grid, MAX_EST_DT)[0] == 200.0
+    # A row that does not parse as two numbers is skipped whole.
+    path = Path(tempfile.mkstemp(suffix=".csv")[1])
+    path.write_text("time,f0\n0.11\n0.12,abc\n0.13,200,extra\n")
+    assert [list(a) for a in read_prediction(path)] == [[0.13], [200.0]]
+    path.unlink()
+
     # Speaker means are the units: two speakers with means 0.2 and 0.4.
     rows = {
         "a": {"speaker": "S1", "f1": 0.1},
