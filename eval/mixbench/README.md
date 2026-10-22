@@ -8,13 +8,14 @@ score any tracker with the same rules.
 Terms:
 
 - **Target**: the talker whose pitch the tracker must report. In every mixture
-  the target speaks alone for 0.5-1.0 s before any other talker starts, and the
-  target is at least as loud as each other talker.
+  the target speaks alone for about 0.5-1.0 s before any other talker starts,
+  and the target is at least as loud as each other talker.
 - **Interferer**: any other talker in the mixture.
 - **SNR / SIR**: signal-to-noise and signal-to-interferer ratio, in dB.
 - **Active span**: the samples from the first to the last voiced reference
   frame of an utterance (each 32 ms analysis window included).
-- **Reference grid**: the 10 ms frames of the target's reference pitch.
+- **Reference grid**: every 10 ms frame of the target's reference pitch file
+  (silent frames included), as listed in the target track of `.refs.json`.
 - **Capture**: the tracker reports an interferer's pitch instead of the
   target's.
 
@@ -75,10 +76,13 @@ utterance produces nine mixtures:
   SNRs. SNR = target active-span power / noise-segment power.
 - **Interferers**: the single interferer has the same sex as the target for
   even target indices and the other sex for odd ones (126 of each in test).
-  The three babble talkers are other speakers. Each interferer is a chain of
-  its utterances, cut to their active spans, never the target's sentence,
-  separated by 0.1-0.4 s pauses. The chain starts 0.5-1.0 s after the target's
-  first voiced frame and runs to the end of the mixture. Each talker gets the
+  The three babble talkers are three other speakers, never the single
+  interferer. Each interferer is a chain of its utterances, cut to their
+  active spans, never the target's sentence, separated by 0.1-0.4 s pauses.
+  The chain starts 0.5-1.0 s after the start of the target's active span (16
+  ms before its first voiced frame time). It stops when the next utterance
+  would start at or after the mixture end, and the end cuts the last
+  utterance. Each talker gets the
   gain that makes its power over its chain equal to target active power /
   (talkers x 10^(SIR/10)).
 - **Sum order**: target, then interferer segments in manifest order, then
@@ -86,7 +90,9 @@ utterance produces nine mixtures:
   to 0.99 (22 of 756 test mixtures). The WAV holds the float32 result.
 - **Fingerprint**: `sha256` in the manifest is the SHA-256 of the float32
   little-endian samples. The manifest stores every gain, so the render step
-  does not compute a level.
+  does not compute a level. Do not hash the WAV files: libsndfile writes a
+  time stamp into each file's PEAK chunk, so the file bytes change on every
+  render.
 
 ### Reference tracks
 
@@ -104,15 +110,17 @@ overall accuracy, so the scorer keeps the documented 16 ms.
 ### Prediction format
 
 One CSV per mixture, `<name>.csv`, rows `time_seconds,f0_hz`, any hop, any
-row order, header optional. `f0 <= 0` (or NaN replaced by 0) means unvoiced.
+row order. The scorer skips every row that does not parse as two numbers.
+`f0 <= 0` (or NaN replaced by 0) means unvoiced.
 
 ### Metrics (`score.py`)
 
 The scorer evaluates each clip on the target reference grid:
 
-1. For each grid time, take the prediction frame nearest in time (ties go to
-   the earlier frame). If that frame is more than 10 ms away, the estimate is
-   unvoiced at that time.
+1. Round all times to whole microseconds. For each grid time, take the
+   prediction frame nearest in time. A tie goes to the earlier frame. If rows
+   share a time stamp, the last row counts. If the nearest frame is more than
+   10 ms away, the estimate is unvoiced at that time.
 2. For each interferer track, take its nearest frame within 5 ms, else
    unvoiced.
 3. A frame is a **hit** when the target and the estimate are voiced and
@@ -122,7 +130,7 @@ With T = target voiced, E = estimate voiced, I = any interferer voiced:
 
 | metric | definition |
 | --- | --- |
-| `f1` | 2PR / (P + R) with P = `precision`, R = `rpa`; 0 when E is empty |
+| `f1` | 2PR / (P + R) with P = `precision`, R = `rpa`; 0 when there is no hit |
 | `precision` | hits / E |
 | `rpa` | hits / T (raw pitch accuracy) |
 | `rpa_overlap` | hits in I / T in I |
@@ -130,12 +138,55 @@ With T = target voiced, E = estimate voiced, I = any interferer voiced:
 | `vr` | (T and E) / T |
 | `vfa` | (E and not T) / not T |
 | `gpe` | (T and E and not hit) / (T and E) |
-| `capture` | (E, not hit, estimate within 50 cents of a voiced interferer) / I |
+| `capture` | frames with E, no hit, and the estimate within 50 cents of an interferer voiced at that frame (target voiced or not) / I |
 | `fpe` | median absolute cents error over hits |
 
 A ratio with a zero denominator is NaN and drops out of the means.
 `f1` is the headline metric: it charges a missed target frame and a reported
 wrong frame equally, independent of the share of unvoiced frames.
+
+### Methods (`run.py`)
+
+Every method searches 71-800 Hz. "Live" means that the method can run on a
+stream. The delay column gives the time after a frame's time stamp at which
+its value is known.
+
+| method | mode | delay | what it runs |
+| --- | --- | --- | --- |
+| reim-live | live | 21 ms | `reim f0` with `REIM_VOICING_REFINE=0 REIM_PITCH_REFINE=0` (half of the 2048-point window) |
+| reim-live-gate | live | 21 ms | reim-live with `REIM_VOICING_SCORE_MIN=0.6` |
+| reim-offline | offline | file | `reim f0` defaults (Viterbi voicing and pitch refinement) |
+| praat | offline | file | Praat `to_pitch_ac` (parselmouth 0.4.7), 10 ms step, Viterbi path |
+| pyin | offline | file | librosa 1.0.0 pYIN at 16 kHz, 1024-point frame, 10 ms hop |
+| swiftf0 | live | 176 ms (its README) | SwiftF0 0.3.0, voiced when confidence >= 0.5 |
+| dfn3+reim-live | live | DFN3 + 21 ms | DeepFilterNet3 (`deep-filter` 0.5.6 `-D`, lookahead 2 frames) then reim-live |
+| dfn3+reim-live-gate | live | DFN3 + 21 ms | DeepFilterNet3 then reim-live-gate |
+| rnnoise+reim-live | live | 10 ms + 21 ms | RNNoise, xiph main 70f1d25, 16-bit, its 480-sample delay removed, then reim-live |
+| wiener+reim-live | offline | file | `reim enhance` from branch voice-enhancement 19ace40 (two-pass Wiener) then reim-live |
+| `<base>+lock` | as base | base, at least 15 ms | causal target lock (`lock.py`) on the base track |
+| `<base>+lock-offline` | offline | file | offline target lock on the base track |
+
+The target lock keeps a voiced frame when the frame's level (30 ms window)
+is within `level_db` of the 90th percentile of recent voiced-frame levels and
+its pitch is within `range_cents` of the target's median pitch. An accepted
+run continues while the pitch moves at most 100 cents per frame. The offline
+form takes both statistics from the whole file and accepts or rejects each
+voiced run. `tune_lock.py` chose `level_db` and `range_cents` per base
+method by mean dev F1; `run.py` `LOCKS` holds the values.
+
+Tools in `$REIM_BENCH_DATA/tools` (SHA-256):
+
+| file | source | sha256 |
+| --- | --- | --- |
+| deep-filter-0.5.6 | GitHub release `deep-filter-0.5.6-aarch64-apple-darwin` | `4601e7f4e4c03e59a4c5b5000216ef3add3e808799cfccd95e14e83ea4611081` |
+| rnnoise_demo-70f1d25 | `gitlab.xiph.org/xiph/rnnoise` main 70f1d25, `./autogen.sh && ./configure --disable-shared && make` (model `rnnoise_data-0a8755f8...`) | `0eef040df9b9408710c9db670cbbe0d2751198502bb3408fccd8e5ce878b245c` |
+| reim-enhance-19ace40 | `git archive voice-enhancement`, `cargo build --release` | `48eeb7d36de1aa26a9268c2cc3b90bd52ccd75db2a2267aca079bf9f60d18294` |
+
+The `reim` binary is `target/release/reim` of the commit in each
+`.run.json`. Native binaries are arm64 macOS builds. Another platform needs
+its own build and can give a different prediction digest.
+
+### Summary statistics
 
 Summary tables (`score.py --compare`) give the mean over clips for each
 condition. The 95% interval comes from 2000 bootstrap resamples of target
