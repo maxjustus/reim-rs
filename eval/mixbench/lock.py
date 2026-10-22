@@ -6,10 +6,12 @@ speaker's range. The lock starts a voiced run only when the frame's level is
 within `level_db` of that target level and its pitch is within `range_cents`
 of the target's median pitch. Everything else is reported unvoiced.
 
-causal  the target level and pitch come from past frames only. An accepted
-        run continues while the pitch moves less than CONTINUE_CENTS per
-        frame, so soft syllable tails stay voiced. No latency beyond the 30 ms
-        level window.
+causal  the target level and pitch come from the last HISTORY_S of voiced
+        frames: the pitch is the median of the frames within CLEAR_DB of the
+        target level, so a louder voice takes over once it has spoken for a
+        while. An accepted run continues while the pitch moves less than
+        CONTINUE_CENTS per frame, so soft syllable tails stay voiced. No
+        latency beyond the 30 ms level window.
 offline the target level and pitch come from the whole recording (two passes),
         and each voiced run is accepted or rejected as a unit by its louder
         frames.
@@ -22,7 +24,8 @@ import numpy as np
 LEVEL_WINDOW_S = 0.030
 HISTORY_S = 2.0  # voiced-frame history for the causal target level and pitch
 LEVEL_PERCENTILE = 90
-MIN_PROFILE_FRAMES = 20  # accepted frames before the pitch-range test applies
+CLEAR_DB = 3.0  # frames this close to the target level define the target pitch
+MIN_PROFILE_FRAMES = 20  # clear frames before the pitch-range test applies
 RUN_JUMP_CENTS = 300  # a larger frame-to-frame jump starts a new voiced run
 CONTINUE_CENTS = 100  # per-frame pitch change that an accepted run may follow
 
@@ -40,20 +43,20 @@ def lock_causal(times, f0, levels, level_db, range_cents):
     out = np.zeros_like(f0)
     hop = np.median(np.diff(times)) if len(times) > 1 else 0.005
     history = int(HISTORY_S / hop)
-    voiced_levels = deque(maxlen=history)
-    accepted_cents = deque(maxlen=history)
+    recent_levels = deque(maxlen=history)
+    recent_cents = deque(maxlen=history)
     for i in np.flatnonzero(f0 > 0):
-        voiced_levels.append(levels[i])
         cents = 1200 * np.log2(f0[i] / 440)
-        continuing = i > 0 and out[i - 1] > 0 and abs(cents - accepted_cents[-1]) <= CONTINUE_CENTS
-        loud = levels[i] >= np.percentile(voiced_levels, LEVEL_PERCENTILE) - level_db
-        in_range = (
-            len(accepted_cents) < MIN_PROFILE_FRAMES
-            or abs(cents - np.median(accepted_cents)) <= range_cents
-        )
+        recent_levels.append(levels[i])
+        recent_cents.append(cents)
+        level_array = np.asarray(recent_levels)
+        target_level = np.percentile(level_array, LEVEL_PERCENTILE)
+        clear = np.asarray(recent_cents)[level_array >= target_level - CLEAR_DB]
+        continuing = i > 0 and out[i - 1] > 0 and abs(cents - 1200 * np.log2(out[i - 1] / 440)) <= CONTINUE_CENTS
+        loud = levels[i] >= target_level - level_db
+        in_range = len(clear) < MIN_PROFILE_FRAMES or abs(cents - np.median(clear)) <= range_cents
         if continuing or (loud and in_range):
             out[i] = f0[i]
-            accepted_cents.append(cents)
     return out
 
 
