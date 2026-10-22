@@ -15,8 +15,9 @@ Terms:
 - **SNR / SIR**: signal-to-noise and signal-to-interferer ratio, in dB.
 - **Active span**: the samples from 16 ms before the first voiced reference
   frame to 16 ms after the last one (half of the 32 ms RAPT window).
-- **Reference grid**: every 10 ms frame of the target's reference pitch file
-  (silent frames included), as listed in the target track of `.refs.json`.
+- **Reference grid**: the 10 ms frames of the target's reference pitch that
+  lie inside the target window (silent frames included), as listed in the
+  target track of `.refs.json`.
 - **Capture**: the tracker reports an interferer's pitch instead of the
   target's.
 
@@ -84,9 +85,9 @@ the clearest-voice rule makes it the target.
 - **Noise**: one environment and start sample per target, used for all three
   SNRs. SNR = target active-span power / noise-segment power.
 - **Interferers**: the single interferer has the same sex as the target for
-  even target indices and the other sex for odd ones (126 of each per talker
-  condition in test). The ahead mixtures use the same speaker with a
-  different chain of utterances.
+  even target indices and the other sex for odd ones (42 of each per talker
+  or ahead condition in test). The ahead mixtures use the same speaker with a
+  separately drawn chain, which can repeat an utterance of the talker chain.
   The three babble talkers are three other speakers, never the single
   interferer. Each interferer is a chain of its utterances, cut to their
   active spans, never the target's sentence, separated by 0.1-0.4 s pauses.
@@ -124,19 +125,21 @@ measures how much a result depends on this offset.
 ### Prediction format
 
 One CSV per mixture, `<name>.csv`, rows `time_seconds,f0_hz`, any hop, any
-row order. The scorer skips every row that does not parse as two numbers.
+row order. The scorer reads the first two fields of each row and skips a
+row whose first two fields do not parse as numbers.
 `f0 <= 0` (or NaN replaced by 0) means unvoiced.
 
 ### Metrics (`score.py`)
 
 The scorer evaluates each clip on the target reference grid:
 
-1. Round all times to whole microseconds. For each grid time, take the
-   prediction frame nearest in time. A tie goes to the earlier frame. If rows
-   share a time stamp, the last row counts. If the nearest frame is more than
-   10 ms away, the estimate is unvoiced at that time.
-2. For each interferer track, take its nearest frame within 5 ms, else
-   unvoiced.
+1. Round all times (grid, prediction, interferer) to whole microseconds.
+   For each grid time, take the prediction frame nearest in time. A tie goes
+   to the earlier frame. If rows share a time stamp, the last row counts. If
+   the nearest frame is more than 10 ms away (exactly 10 ms counts as
+   within), the estimate is unvoiced at that time.
+2. For each interferer track, take its nearest frame by the same rule with a
+   5 ms limit, else unvoiced.
 3. A frame is a **hit** when the target and the estimate are voiced and
    `|1200 log2(est / target)| <= 50` cents.
 
@@ -220,14 +223,17 @@ its own build and can give a different prediction digest.
 ### Summary statistics
 
 The speakers are the independent units. `score.py --compare` averages the
-clips of each target speaker, then gives the mean of the speaker means with a
-95% t interval (8 dev or 12 test speakers, df = speakers - 1). A paired delta
-joins two methods on the mixture id and applies the same t interval to the
-per-speaker mean differences.
+clips of each target speaker that have a value, then gives the mean of the
+speaker means with a 95% t interval (df = number of such speakers - 1; 8 on
+dev, 12 on test). If all speaker means are equal, the interval is that value.
+A paired delta joins two methods on the mixture id, takes the per-clip
+difference (method minus baseline), and applies the same procedure to those
+differences. Each test is two-sided.
 
 `score.py --primary` runs the four comparisons in `PRIMARY` on F1 for each
-condition group (clean, noise, talker, ahead, babble): 20 paired t tests,
-with Holm-adjusted p values. The list was fixed before the test split was
+condition group (clean, noise, talker, ahead, babble). A speaker's value in
+a group is the mean of all its clips in that group. That gives 20 paired
+two-sided t tests, with Holm-adjusted p values. The list was fixed before the test split was
 scored.
 
 ## How-to
