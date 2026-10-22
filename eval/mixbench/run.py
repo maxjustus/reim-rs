@@ -227,7 +227,7 @@ def code_identity(split):
         [*git, "status", "--porcelain", "--", "src", "Cargo.toml", "Cargo.lock", "eval/mixbench", ":!eval/mixbench/results"],
         capture_output=True, text=True, check=True,
     ).stdout
-    files = [HERE / "run.py", HERE / "lock.py", HERE / "manifest" / f"{split}.jsonl"]
+    files = [HERE / f for f in ["run.py", "lock.py", "score.py", "tune_lock.py", f"manifest/{split}.jsonl"]]
     return {
         "commit": commit,
         "clean": not changes,
