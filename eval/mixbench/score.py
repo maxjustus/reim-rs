@@ -221,10 +221,14 @@ def primary(split, shift_dir):
     print("|---|---|---|---|---|---|---|---|")
     for r, holm in zip(rows, adjusted, strict=True):
         print(
-            f"| {r[0]} | {r[1]} | {r[2]:+.3f} | {r[3]:+.3f} | {r[4]:+.3f} | [{r[5]:+.3f}, {r[6]:+.3f}] "
+            f"| {r[0]} | {r[1]} | {signed(r[2])} | {signed(r[3])} | {r[4]:+.3f} | [{r[5]:+.3f}, {r[6]:+.3f}] "
             f"| {r[7]:.4f} | {holm:.4f} |"
         )
     return 0
+
+
+def signed(value):
+    return "-" if math.isnan(value) else f"{value:+.3f}"
 
 
 def load_scores(split, method, shift_dir=""):
