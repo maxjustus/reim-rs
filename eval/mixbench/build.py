@@ -31,9 +31,11 @@ DATA = Path(os.environ.get("REIM_BENCH_DATA", Path.home() / "datasets" / "reim-m
 FS = 48000
 SEED = 20251021
 
-# PTDB-TUG reference frame i is the center of a 32 ms RAPT window, 10 ms hop.
-REF_T0 = 0.016
+# PTDB-TUG reference: RAPT, 32 ms window, 10 ms hop. Frame i sits at
+# REF_T0 + i * REF_HOP; ref_offset.py measured REF_T0 against the laryngograph.
+REF_T0 = 0.0195
 REF_HOP = 0.010
+REF_HALF_WINDOW = 0.016
 
 SPLITS = {
     "dev": {
@@ -60,11 +62,14 @@ CONDITIONS = [
     ("talker_sir10", "talker", 10),
     ("talker_sir5", "talker", 5),
     ("talker_sir0", "talker", 0),
+    ("ahead_sir10", "ahead", 10),
+    ("ahead_sir5", "ahead", 5),
     ("babble_sir5", "babble", 5),
     ("babble_sir0", "babble", 0),
 ]
 BABBLE_TALKERS = 3
-LEAD_RANGE_S = (0.5, 1.0)  # interferer onset after the target's first voiced frame
+PAD_S = 0.25  # target file kept around its active span
+LEAD_RANGE_S = (0.5, 1.0)  # head start of whichever voice speaks first
 GAP_RANGE_S = (0.1, 0.4)  # pause between an interferer's consecutive utterances
 MIN_ACTIVE_S, MAX_DURATION_S = 2.5, 8.0
 MIN_VOICED_FRAMES = 100
@@ -142,12 +147,17 @@ def file_sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def ref_sha256(source):
+    """SHA-256 of the reference F0 column as float64 little-endian."""
+    return hashlib.sha256(load_ref(source).astype("<f8").tobytes()).hexdigest()
+
+
 def active_span(f0, n):
     """Sample range from the first to the last voiced reference frame."""
     voiced = np.flatnonzero(f0 > 0)
-    lo = int(round(REF_HOP * voiced[0] * FS))
-    hi = int(round((REF_HOP * voiced[-1] + 2 * REF_T0) * FS))
-    return lo, min(hi, n)
+    lo = int(round((REF_T0 + REF_HOP * voiced[0] - REF_HALF_WINDOW) * FS))
+    hi = int(round((REF_T0 + REF_HOP * voiced[-1] + REF_HALF_WINDOW) * FS))
+    return max(lo, 0), min(hi, n)
 
 
 def active_power(x, f0):
@@ -202,26 +212,43 @@ def pick_targets(rng, pool, spec):
 
 
 def mixtures_for_target(rng, split, target, target_index, pool, envs):
+    """All conditions of one target, in five layouts. The target window is
+    its active span plus PAD_S each side. In clean/noise/talker mixtures the
+    target starts at sample 0 and the talker joins after a lead. In
+    ahead/babble mixtures the interferers start at sample 0 and the target
+    window starts after a lead."""
     spk = speaker_of(target)
-    x = load_audio(target)
     f0 = load_ref(target)
-    n = len(x)
+    x = load_audio(target)
+    lo, hi = active_span(f0, len(x))
+    w0, w1 = max(0, lo - int(PAD_S * FS)), min(len(x), hi + int(PAD_S * FS))
+    window = w1 - w0
     p_target = active_power(x, f0)
-    onset = active_span(f0, n)[0]
 
     env = str(rng.choice(sorted(envs)))
-    noise_start = int(rng.integers(0, envs[env] - n))
-    noise_power = float(np.mean(load_audio(f"demand:{env}", noise_start, n) ** 2))
+    noise_start = int(rng.integers(0, envs[env] - window))
+    noise_power = float(np.mean(load_audio(f"demand:{env}", noise_start, window) ** 2))
 
     others = [s for s in pool if s != spk]
     want_same = target_index % 2 == 0
     talker = str(rng.choice([s for s in others if (s[0] == spk[0]) == want_same]))
-    talker_track = interferer_track(rng, talker, target, pool, n, onset)
+    talker_track = interferer_track(rng, talker, target, pool, lo - w0 + lead(rng), window)
+    ahead_start = lead(rng)
+    ahead_track = interferer_track(rng, talker, target, pool, 0, ahead_start + window)
     babble_speakers = [str(s) for s in rng.choice([s for s in others if s != talker], BABBLE_TALKERS, replace=False)]
-    babble_tracks = [interferer_track(rng, s, target, pool, n, onset) for s in babble_speakers]
+    babble_start = lead(rng)
+    babble_tracks = [interferer_track(rng, s, target, pool, 0, babble_start + window) for s in babble_speakers]
+    layouts = {
+        "clean": (0, []),
+        "noise": (0, []),
+        "talker": (0, [talker_track]),
+        "ahead": (ahead_start, [ahead_track]),
+        "babble": (babble_start, babble_tracks),
+    }
 
     mixes = []
     for cond, kind, level in CONDITIONS:
+        target_start, tracks = layouts[kind]
         m = {
             "id": f"{split}/{spk}_{target_key(target).split('/')[1]}/{cond}",
             "split": split,
@@ -229,9 +256,17 @@ def mixtures_for_target(rng, split, target, target_index, pool, envs):
             "kind": kind,
             "level_db": level,
             "fs": FS,
-            "length": n,
-            "target": {"source": target, "sha256": file_sha256(source_path(target)), "gain": 1.0},
-            "interferers": [],
+            "length": target_start + window,
+            "target": {
+                "source": target,
+                "sha256": file_sha256(source_path(target)),
+                "ref_sha256": ref_sha256(target),
+                "src_start": w0,
+                "dst_start": target_start,
+                "length": window,
+                "gain": 1.0,
+            },
+            "interferers": [scaled(t, p_target, level, len(tracks)) for t in tracks],
             "noise": None,
         }
         if kind == "noise":
@@ -241,10 +276,6 @@ def mixtures_for_target(rng, split, target, target_index, pool, envs):
                 "src_start": noise_start,
                 "gain": float(np.sqrt(p_target / (noise_power * 10 ** (level / 10)))),
             }
-        elif kind == "talker":
-            m["interferers"] = [scaled(talker_track, p_target, level, 1)]
-        elif kind == "babble":
-            m["interferers"] = [scaled(t, p_target, level, BABBLE_TALKERS) for t in babble_tracks]
         y = mix(m)
         peak = float(np.max(np.abs(y)))
         m["out_gain"] = min(1.0, PEAK_LIMIT / peak) if peak > 0 else 1.0
@@ -261,13 +292,17 @@ def target_key(source):
     return source.split(":", 1)[1]
 
 
-def interferer_track(rng, spk, target, pool, n, onset):
+def lead(rng):
+    return int(round(rng.uniform(*LEAD_RANGE_S) * FS))
+
+
+def interferer_track(rng, spk, target, pool, start, n):
     """Concatenate the active spans of `spk`'s utterances (never the target's
-    sentence), separated by short pauses, from a random lead after the target's
-    onset to the end of the mixture."""
+    sentence), separated by short pauses, from sample `start` until the next
+    utterance would start at or after sample `n`."""
     target_sentence = target.split("/")[1]
     candidates = [u for u in pool[spk] if u.split("/")[1] != target_sentence]
-    pos = onset + int(round(rng.uniform(*LEAD_RANGE_S) * FS))
+    pos = start
     segments = []
     for i in rng.permutation(len(candidates)):
         if pos >= n:
@@ -288,7 +323,7 @@ def scaled(track, p_target, sir_db, talkers):
     return {
         "speaker": track["speaker"],
         "segments": [
-            {**seg, "sha256": file_sha256(source_path(seg["source"])), "gain": g}
+            {**seg, "sha256": file_sha256(source_path(seg["source"])), "ref_sha256": ref_sha256(seg["source"]), "gain": g}
             for seg in track["segments"]
         ],
     }
@@ -301,7 +336,10 @@ def scaled(track, p_target, sir_db, talkers):
 def mix(m):
     """Float64 sum in a fixed order: target, interferer segments, noise."""
     y = np.zeros(m["length"], dtype=np.float64)
-    y += m["target"]["gain"] * load_audio(m["target"]["source"])[: m["length"]]
+    tgt = m["target"]
+    y[tgt["dst_start"] : tgt["dst_start"] + tgt["length"]] += tgt["gain"] * load_audio(
+        tgt["source"], tgt["src_start"], tgt["length"]
+    )
     for interferer in m["interferers"]:
         for seg in interferer["segments"]:
             x = load_audio(seg["source"], seg["src_start"], seg["length"])
@@ -323,9 +361,11 @@ def render():
         out_dir.mkdir(parents=True, exist_ok=True)
         for line in (HERE / "manifest" / f"{split}.jsonl").read_text().splitlines():
             m = json.loads(line)
-            for source, digest in sources_of(m):
+            for source, digest, ref_digest in sources_of(m):
                 if source not in checked:
-                    checked[source] = file_sha256(source_path(source)) == digest
+                    checked[source] = file_sha256(source_path(source)) == digest and (
+                        ref_digest is None or ref_sha256(source) == ref_digest
+                    )
                     if not checked[source]:
                         print(f"SOURCE MISMATCH {source}", flush=True)
                         failures += 1
@@ -343,12 +383,12 @@ def render():
 
 
 def sources_of(m):
-    yield m["target"]["source"], m["target"]["sha256"]
+    yield m["target"]["source"], m["target"]["sha256"], m["target"]["ref_sha256"]
     for interferer in m["interferers"]:
         for seg in interferer["segments"]:
-            yield seg["source"], seg["sha256"]
+            yield seg["source"], seg["sha256"], seg["ref_sha256"]
     if m["noise"]:
-        yield m["noise"]["source"], m["noise"]["sha256"]
+        yield m["noise"]["source"], m["noise"]["sha256"], None
 
 
 def references(m):
@@ -362,7 +402,7 @@ def references(m):
 
     return {
         "id": m["id"],
-        "target": track(m["target"]["source"], 0, m["length"], 0),
+        "target": track(m["target"]["source"], m["target"]["src_start"], m["target"]["length"], m["target"]["dst_start"]),
         "interferers": [
             track(seg["source"], seg["src_start"], seg["length"], seg["dst_start"])
             for interferer in m["interferers"]
