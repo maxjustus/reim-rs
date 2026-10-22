@@ -132,7 +132,6 @@ METHODS = {
 # base: ((level_db, range_cents) causal, (level_db, range_cents) offline), chosen by tune_lock.py on dev
 LOCKS = {
     "reim-live-gate": ((12, 600), (9, 800)),
-    "dfn3+reim-live": ((9, math.inf), (6, 600)),
     "dfn3+reim-live-gate": ((12, 600), (9, 800)),
     "swiftf0": ((9, math.inf), (6, 800)),
 }
@@ -197,7 +196,7 @@ def run_method(split, method, jobs):
         "split": split,
         "clips": len(names),
         "predictions_sha256": digest.hexdigest(),
-        "reim": reim_identity(),
+        "code": code_identity(split),
         "tools": {t: file_sha256(TOOLS / t) for t in tools},
         "packages": {p: importlib.metadata.version(p) for p in packages},
         "platform": f"{platform.system()} {platform.release()} {platform.machine()}, Python {platform.python_version()}",
@@ -220,9 +219,21 @@ def predict(method, wav, out):
     return time.perf_counter() - started
 
 
-def reim_identity():
-    commit = subprocess.run(["git", "-C", str(REPO), "describe", "--always", "--dirty"], capture_output=True, text=True).stdout.strip()
-    return {"commit": commit, "binary_sha256": file_sha256(REIM)}
+def code_identity(split):
+    """Commit, whether the code paths differ from it (untracked files included), and file hashes."""
+    git = ["git", "-C", str(REPO)]
+    commit = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    changes = subprocess.run(
+        [*git, "status", "--porcelain", "--", "src", "Cargo.toml", "Cargo.lock", "eval/mixbench", ":!eval/mixbench/results"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    files = [HERE / "run.py", HERE / "lock.py", HERE / "manifest" / f"{split}.jsonl"]
+    return {
+        "commit": commit,
+        "clean": not changes,
+        "reim_sha256": file_sha256(REIM),
+        "files": {str(f.relative_to(REPO)): file_sha256(f) for f in files},
+    }
 
 
 def file_sha256(path):
