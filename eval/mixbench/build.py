@@ -32,8 +32,8 @@ FS = 48000
 SEED = 20251021
 
 # PTDB-TUG reference: RAPT, 32 ms window, 10 ms hop. Frame i sits at
-# REF_T0 + i * REF_HOP; ref_offset.py measured REF_T0 against the laryngograph.
-REF_T0 = 0.0195
+# REF_T0 + i * REF_HOP in microphone time; ref_offset.py measured REF_T0.
+REF_T0 = 0.0215
 REF_HOP = 0.010
 REF_HALF_WINDOW = 0.016
 
@@ -61,7 +61,6 @@ CONDITIONS = [
     ("noise_snr0", "noise", 0),
     ("talker_sir10", "talker", 10),
     ("talker_sir5", "talker", 5),
-    ("talker_sir0", "talker", 0),
     ("ahead_sir10", "ahead", 10),
     ("ahead_sir5", "ahead", 5),
     ("babble_sir5", "babble", 5),
@@ -390,7 +389,8 @@ def sources_of(m):
 
 
 def references(m):
-    """Reference F0 tracks on the mixture timeline (times in seconds)."""
+    """Reference F0 tracks on the mixture timeline (times in seconds). The
+    target track runs from time 0, unvoiced before the target window."""
     def track(source, src_start, length, dst_start):
         f0 = load_ref(source)
         center = REF_T0 + REF_HOP * np.arange(len(f0))
@@ -398,9 +398,15 @@ def references(m):
         t = center[keep] + (dst_start - src_start) / FS
         return {"time": t.round(6).tolist(), "f0": f0[keep].tolist()}
 
+    target = track(m["target"]["source"], m["target"]["src_start"], m["target"]["length"], m["target"]["dst_start"])
+    before = np.arange(int(target["time"][0] / REF_HOP + 1e-9), 0, -1)
+    target = {
+        "time": [round(target["time"][0] - REF_HOP * k, 6) for k in before] + target["time"],
+        "f0": [0.0] * len(before) + target["f0"],
+    }
     return {
         "id": m["id"],
-        "target": track(m["target"]["source"], m["target"]["src_start"], m["target"]["length"], m["target"]["dst_start"]),
+        "target": target,
         "interferers": [
             track(seg["source"], seg["src_start"], seg["length"], seg["dst_start"])
             for interferer in m["interferers"]
