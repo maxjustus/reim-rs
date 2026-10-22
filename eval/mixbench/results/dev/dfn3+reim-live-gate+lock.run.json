@@ -3,16 +3,18 @@
  "mode": "live",
  "description": "dfn3+reim-live-gate, then causal target lock (level_db=12, range_cents=inf)",
  "split": "dev",
- "clips": 440,
- "predictions_sha256": "0fc3c5b830328f3c8b6cbf875285729009d57b1b0f1769ea2eda54546941db24",
+ "clips": 400,
+ "predictions_sha256": "53a4b33cb5fc0cf15f1e5785d2bfbdb4203c58c7566028e9814d921bb2fdc9af",
  "code": {
-  "commit": "22ca5dfb008eed4101b58d99ba6bf709564f99f8",
+  "commit": "5eaca7b9c68c700c977d7c614242fc68cf5ca83c",
   "clean": true,
   "reim_sha256": "4eb88025a9bfa0221357c558d25a777a5148ccbc63879b3c55f81d8cd49d0633",
   "files": {
-   "eval/mixbench/run.py": "77b07bcf73c9d96cbab1be1712abc6292b344d5a554f8688d9d62411a7c7536e",
+   "eval/mixbench/run.py": "9ba4c20d153a0e87921f145178abf5328519687483b4afdba6e8bf76f6b26aaf",
    "eval/mixbench/lock.py": "6cad095b094137cc07243ef356582f099d038e1f03e3a16dc0dc41e1b29b4b77",
-   "eval/mixbench/manifest/dev.jsonl": "fc652fb14836f72561634ea5967b38c8612c76cd4c9a051603f861d711bc83a5"
+   "eval/mixbench/score.py": "d6e2269d545c5ec9548fd369aca9f682d5639bb5a84be90238fbf090e7a5c68a",
+   "eval/mixbench/tune_lock.py": "52c7a77d65404d2ce214150d6575a996d8267a69231d47df3d48422581d7e4ba",
+   "eval/mixbench/manifest/dev.jsonl": "997e2c16ec6a256b722d29d0cac59e07a155a0d02cb169f803a47a8bd00901f4"
   }
  },
  "tools": {
@@ -20,8 +22,8 @@
  },
  "packages": {},
  "platform": "Darwin 27.0.0 arm64, Python 3.14.3",
- "audio_seconds": 1744.497,
- "process_seconds": 291.205,
- "real_time_factor": 0.16693,
- "wall_seconds": 21.1
+ "audio_seconds": 1596.69,
+ "process_seconds": 208.225,
+ "real_time_factor": 0.13041,
+ "wall_seconds": 15.2
 }

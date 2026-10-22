@@ -3,23 +3,25 @@
  "mode": "offline",
  "description": "reim f0 defaults: offline Viterbi voicing + pitch refinement",
  "split": "dev",
- "clips": 440,
- "predictions_sha256": "c1a612f24aeedf97fd3dfbf6479b7ed460514d4033e4d8cbf27d040f553daf59",
+ "clips": 400,
+ "predictions_sha256": "33681e125575522f6800db28dd98672241355185940cdc913c1f8cbabef04dc7",
  "code": {
-  "commit": "994975616e1a20a12cbb6bf20e99a6ab0077e3ec",
+  "commit": "960e09dfa592a66162480b337c35e1373bc5e4b5",
   "clean": true,
   "reim_sha256": "4eb88025a9bfa0221357c558d25a777a5148ccbc63879b3c55f81d8cd49d0633",
   "files": {
-   "eval/mixbench/run.py": "21c394c9bb4efbafeb5e285b37c7f3035f56133059fb66a29cced1d173aacc9b",
+   "eval/mixbench/run.py": "127e7b472524b302cf077e02ab663450bab755c16ebf2e3f1324b6243254bae1",
    "eval/mixbench/lock.py": "6cad095b094137cc07243ef356582f099d038e1f03e3a16dc0dc41e1b29b4b77",
-   "eval/mixbench/manifest/dev.jsonl": "fc652fb14836f72561634ea5967b38c8612c76cd4c9a051603f861d711bc83a5"
+   "eval/mixbench/score.py": "d6e2269d545c5ec9548fd369aca9f682d5639bb5a84be90238fbf090e7a5c68a",
+   "eval/mixbench/tune_lock.py": "52c7a77d65404d2ce214150d6575a996d8267a69231d47df3d48422581d7e4ba",
+   "eval/mixbench/manifest/dev.jsonl": "997e2c16ec6a256b722d29d0cac59e07a155a0d02cb169f803a47a8bd00901f4"
   }
  },
  "tools": {},
  "packages": {},
  "platform": "Darwin 27.0.0 arm64, Python 3.14.3",
- "audio_seconds": 1744.497,
- "process_seconds": 110.797,
- "real_time_factor": 0.06351,
- "wall_seconds": 8.2
+ "audio_seconds": 1596.69,
+ "process_seconds": 118.656,
+ "real_time_factor": 0.07431,
+ "wall_seconds": 8.8
 }
