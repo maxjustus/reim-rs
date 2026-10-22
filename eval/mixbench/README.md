@@ -15,9 +15,9 @@ Terms:
 - **SNR / SIR**: signal-to-noise and signal-to-interferer ratio, in dB.
 - **Active span**: the samples from 16 ms before the first voiced reference
   frame to 16 ms after the last one (half of the 32 ms RAPT window).
-- **Reference grid**: the 10 ms frames of the target's reference pitch that
-  lie inside the target window (silent frames included), as listed in the
-  target track of `.refs.json`.
+- **Reference grid**: the target's 10 ms reference frames from time 0 to
+  the end of the mixture, as listed in the target track of `.refs.json`.
+  Frames before the target window are unvoiced.
 - **Capture**: the tracker reports an interferer's pitch instead of the
   target's.
 
@@ -50,8 +50,8 @@ The two splits share no speaker and no noise environment.
 
 | split | target and interferer speakers | DEMAND environments | targets | mixtures |
 | --- | --- | --- | --- | --- |
-| dev | F01-F04, M01-M04 | DKITCHEN, NPARK, OOFFICE, PSTATION, STRAFFIC, TBUS | 40 | 440 |
-| test | F05-F10, M05-M10 | DLIVING, DWASHING, NFIELD, NRIVER, OHALLWAY, OMEETING, PCAFETER, PRESTO, SCAFE, SPSQUARE, TCAR, TMETRO | 84 | 924 |
+| dev | F01-F04, M01-M04 | DKITCHEN, NPARK, OOFFICE, PSTATION, STRAFFIC, TBUS | 40 | 400 |
+| test | F05-F10, M05-M10 | DLIVING, DWASHING, NFIELD, NRIVER, OHALLWAY, OMEETING, PCAFETER, PRESTO, SCAFE, SPSQUARE, TCAR, TMETRO | 84 | 840 |
 
 Use dev for every design choice and parameter. Score test once, after the
 method is frozen. `tune_lock.py` reads dev predictions only.
@@ -61,18 +61,20 @@ method is frozen. `tune_lock.py` reads dev predictions only.
 ### Mixture rules (`build.py`)
 
 The random generator is `numpy.random.default_rng(20251021)`. One target
-utterance produces eleven mixtures:
+utterance produces ten mixtures:
 
 | condition | content | who speaks first | level |
 | --- | --- | --- | --- |
 | clean | target only | - | - |
 | noise_snr10, noise_snr5, noise_snr0 | target + one DEMAND segment | - | SNR 10, 5, 0 dB |
-| talker_sir10, talker_sir5, talker_sir0 | target + one interferer | target | SIR 10, 5, 0 dB |
+| talker_sir10, talker_sir5 | target + one interferer | target | SIR 10, 5 dB |
 | ahead_sir10, ahead_sir5 | target + the same interferer | interferer | SIR 10, 5 dB |
 | babble_sir5, babble_sir0 | target + three interferers | interferers | SIR 5, 0 dB (all three together) |
 
-There is no SIR below 0 dB: there the interferer is the clearest voice, so
-the clearest-voice rule makes it the target.
+There is no single-talker mixture at 0 dB or below. At 0 dB neither voice
+is clearer, so only the speaking order would name the target; below 0 dB the
+clearest-voice rule makes the interferer the target. In babble_sir0 each of
+the three talkers is 4.8 dB below the target.
 
 - **Targets**: 5 (dev) or 7 (test) utterances per speaker. An utterance is
   eligible when its active span is at least 2.5 s, its file is at most 8 s, and
@@ -99,7 +101,7 @@ the clearest-voice rule makes it the target.
   (talkers x 10^(SIR/10)).
 - **Sum order**: target, then interferer segments in manifest order, then
   noise, all in float64. If the peak exceeds 0.99, `out_gain` scales the sum
-  to 0.99 (1 of 924 test mixtures). The WAV holds the float32 result.
+  to 0.99 (2 of 400 dev mixtures, 0 test). The WAV holds the float32 result.
 - **Fingerprint**: `sha256` in the manifest is the SHA-256 of the float32
   little-endian samples. The manifest stores every gain, so the render step
   does not compute a level. `ref_sha256` is the SHA-256 of a source's
@@ -111,16 +113,23 @@ the clearest-voice rule makes it the target.
 ### Reference tracks
 
 `build.py render` writes `<name>.refs.json` next to each WAV. Reference frame
-`i` of a source file sits at `0.0195 + 0.010 * i` s. Each segment (target or
+`i` of a source file sits at `0.0215 + 0.010 * i` s. Each segment (target or
 interferer) shifts its frames by `(dst_start - src_start) / 48000` s and keeps
-only frames whose time lies inside the segment. `f0 > 0` marks a voiced frame.
+only frames whose time lies inside the segment. The target track then gets
+unvoiced frames on the same 10 ms grid back to time 0. `f0 > 0` marks a
+voiced frame.
 
 The PTDB-TUG thesis (Pirker 2012, section 6.2) gives the RAPT window (32 ms)
-and hop (10 ms) but not the time of frame 0. `ref_offset.py` tracks pitch on
-the raw laryngograph signal of 231 dev utterances with Praat at a 0.5 ms
-step. Relative to `0.016 + 0.010 * i`, the best shift has a median of +3.5 ms
-(IQR 2.5-4.5 ms), so frame 0 sits at 19.5 ms. `score.py --ref-shift-ms`
-measures how much a result depends on this offset.
+and hop (10 ms) but not the time of frame 0. `ref_offset.py` tracks pitch with
+Praat autocorrelation at a 0.5 ms step on 309 dev utterances. Relative to
+`0.016 + 0.010 * i`, the reference matches the laryngograph best at a median
+shift of +4.0 ms (IQR 2.5-5.0), and the microphone track lags the
+laryngograph track by a median of +1.5 ms (IQR 0.5-2.5), the sound travel to
+the microphone. Frame 0 therefore sits at 21.5 ms in microphone time. An
+independent audit found +4.25 ms for the laryngograph with a tracker-free
+glottal-closure method. Praat cross-correlation gives +8.5 ms and is not
+used. `score.py --ref-shift-ms` measures how much a result depends on this
+offset.
 
 ### Prediction format
 
@@ -196,7 +205,11 @@ of the target pitch. An accepted run continues while the pitch moves at most
 100 cents per frame. The offline form takes both statistics from the whole
 file and accepts or rejects each voiced run. `tune_lock.py` chose
 `level_db` and `range_cents` per base method by mean dev F1, and reports a
-leave-one-speaker-out estimate; `run.py` `LOCKS` holds the values.
+leave-one-speaker-out estimate; `run.py` `LOCKS` holds the values. The other
+lock constants (2 s history, 3 dB clear band, 100 cents continuity) were set
+by hand after dev experiments, outside that loop, so the test split is the
+only clean estimate of the lock. On dev the lock raises F1 only by staying
+silent while an interferer speaks alone: it lowers `rpa` on every condition.
 
 Known advantages and quirks:
 
@@ -233,7 +246,9 @@ differences. Each test is two-sided.
 `score.py --primary` runs the four comparisons in `PRIMARY` on F1 for each
 condition group (clean, noise, talker, ahead, babble). A speaker's value in
 a group is the mean of all its clips in that group. That gives 20 paired
-two-sided t tests, with Holm-adjusted p values. The list was fixed before the test split was
+two-sided t tests, with Holm-adjusted p values. Each row also gives the
+change in `rpa` and `ifa`, which shows whether an F1 change comes from the
+target's pitch or from silence while only an interferer speaks. The list was fixed before the test split was
 scored.
 
 ## How-to
