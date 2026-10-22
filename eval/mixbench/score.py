@@ -201,23 +201,29 @@ def compare(split, methods, shift_dir):
 
 
 def primary(split, shift_dir):
-    """The PRIMARY comparisons on F1 per condition group, with Holm-adjusted p values."""
+    """The PRIMARY comparisons on F1 per condition group, with Holm-adjusted p
+    values. The rpa and ifa deltas show whether an F1 change comes from the
+    target's pitch or from silence while only an interferer speaks."""
     rows = []
     for method, baseline, question in PRIMARY:
         diff = paired(load_scores(split, method, shift_dir), load_scores(split, baseline, shift_dir))
         for group in GROUPS:
             ids = [i for i, r in diff.items() if r["condition"].split("_")[0] == group]
             mean, lo, hi, p = speaker_t(diff, ids, "f1")
-            rows.append([f"{method} vs {baseline}", question, group, mean, lo, hi, p])
+            regions = [speaker_t(diff, ids, k) for k in ("rpa", "ifa")]
+            rows.append([f"{question}: {method} vs {baseline}", group, *[r[0] if r else math.nan for r in regions], mean, lo, hi, p])
     order = np.argsort([r[-1] for r in rows])
     adjusted, running = [0.0] * len(rows), 0.0
     for rank, i in enumerate(order):
         running = max(running, min(1.0, (len(rows) - rank) * rows[i][-1]))
         adjusted[i] = running
-    print("| comparison | group | ΔF1 | 95% CI | p | Holm p |")
-    print("|---|---|---|---|---|---|")
+    print("| comparison | group | Δrpa | Δifa | ΔF1 | 95% CI | p | Holm p |")
+    print("|---|---|---|---|---|---|---|---|")
     for r, holm in zip(rows, adjusted, strict=True):
-        print(f"| {r[0]} | {r[2]} | {r[3]:+.3f} | [{r[4]:+.3f}, {r[5]:+.3f}] | {r[6]:.4f} | {holm:.4f} |")
+        print(
+            f"| {r[0]} | {r[1]} | {r[2]:+.3f} | {r[3]:+.3f} | {r[4]:+.3f} | [{r[5]:+.3f}, {r[6]:+.3f}] "
+            f"| {r[7]:.4f} | {holm:.4f} |"
+        )
     return 0
 
 
