@@ -132,8 +132,8 @@ METHODS = {
 # base: ((level_db, range_cents) causal, (level_db, range_cents) offline), chosen by tune_lock.py on dev
 LOCKS = {
     "reim-live-gate": ((12, 800), (9, 800)),
-    "dfn3+reim-live-gate": ((12, math.inf), (9, math.inf)),
-    "swiftf0": ((12, 600), (9, 800)),
+    "dfn3+reim-live-gate": ((12, math.inf), (9, 800)),
+    "swiftf0": ((12, 600), (6, 800)),
 }
 
 
