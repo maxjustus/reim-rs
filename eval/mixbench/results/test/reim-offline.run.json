@@ -1,0 +1,27 @@
+{
+ "method": "reim-offline",
+ "mode": "offline",
+ "description": "reim f0 defaults: offline Viterbi voicing + pitch refinement",
+ "split": "test",
+ "clips": 840,
+ "predictions_sha256": "4a221d82c745e8289b1ed0801f5652e724b5edab2dcbaf6ebe99d24a00215d8c",
+ "code": {
+  "commit": "734e6d0766daf026c81909907757583f612b4471",
+  "clean": true,
+  "reim_sha256": "4eb88025a9bfa0221357c558d25a777a5148ccbc63879b3c55f81d8cd49d0633",
+  "files": {
+   "eval/mixbench/run.py": "9ba4c20d153a0e87921f145178abf5328519687483b4afdba6e8bf76f6b26aaf",
+   "eval/mixbench/lock.py": "6cad095b094137cc07243ef356582f099d038e1f03e3a16dc0dc41e1b29b4b77",
+   "eval/mixbench/score.py": "62dfc5fd663d10a94a19c5529edc499c954fe7213bb1e34e0409fa933d0d321e",
+   "eval/mixbench/tune_lock.py": "52c7a77d65404d2ce214150d6575a996d8267a69231d47df3d48422581d7e4ba",
+   "eval/mixbench/manifest/test.jsonl": "e005e58715341cf23a01440abee2b463a65bb2da85919c3124f4171499c074e8"
+  }
+ },
+ "tools": {},
+ "packages": {},
+ "platform": "Darwin 27.0.0 arm64, Python 3.14.3",
+ "audio_seconds": 3342.579,
+ "process_seconds": 242.197,
+ "real_time_factor": 0.07246,
+ "wall_seconds": 17.6
+}
