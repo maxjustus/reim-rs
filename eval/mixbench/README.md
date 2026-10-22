@@ -297,3 +297,100 @@ platform, real-time factor, and `predictions_sha256`, a digest over every
 prediction file. A deterministic method on the same tools must reproduce the
 digest. `run.py` expects the tools under `$REIM_BENCH_DATA/tools` (see the
 method table for the exact builds).
+
+## Results (test split)
+
+All 16 methods ran on the 840 test mixtures from commit `734e6d0` with a
+clean tree, and the test split was scored once after the dev work ended.
+`results/test/` holds the per-clip scores and the run records.
+
+### Target-pitch F1 by condition
+
+Mean of the 12 speaker means. rnnoise+reim-live and wiener+reim-live feed
+reim-live, which has no voicing gate; compare them with reim-live (0.616
+clean, 0.303 at noise_snr0), not with reim-live-gate.
+
+| condition | reim-live-gate | praat | pyin | swiftf0 | rnnoise+reim-live | wiener+reim-live | dfn3+reim-live-gate | dfn3+reim-live-gate+lock | dfn3+reim-live-gate+lock-offline | swiftf0+lock-offline |
+|---|---|---|---|---|---|---|---|---|---|---|
+| clean | 0.763 | 0.795 | 0.688 | 0.818 | 0.632 | 0.621 | 0.767 | 0.761 | 0.754 | 0.756 |
+| noise_snr10 | 0.669 | 0.706 | 0.623 | 0.778 | 0.600 | 0.607 | 0.761 | 0.760 | 0.759 | 0.746 |
+| noise_snr5 | 0.541 | 0.634 | 0.546 | 0.758 | 0.565 | 0.560 | 0.752 | 0.753 | 0.753 | 0.743 |
+| noise_snr0 | 0.321 | 0.517 | 0.348 | 0.727 | 0.493 | 0.449 | 0.724 | 0.724 | 0.726 | 0.717 |
+| talker_sir10 | 0.636 | 0.657 | 0.592 | 0.674 | 0.559 | 0.533 | 0.698 | 0.713 | 0.724 | 0.715 |
+| talker_sir5 | 0.561 | 0.589 | 0.520 | 0.618 | 0.500 | 0.484 | 0.627 | 0.632 | 0.644 | 0.648 |
+| ahead_sir10 | 0.546 | 0.566 | 0.508 | 0.577 | 0.458 | 0.464 | 0.597 | 0.612 | 0.688 | 0.708 |
+| ahead_sir5 | 0.474 | 0.487 | 0.450 | 0.515 | 0.412 | 0.412 | 0.524 | 0.532 | 0.556 | 0.575 |
+| babble_sir5 | 0.475 | 0.451 | 0.467 | 0.477 | 0.396 | 0.404 | 0.575 | 0.579 | 0.621 | 0.595 |
+| babble_sir0 | 0.329 | 0.338 | 0.339 | 0.380 | 0.306 | 0.303 | 0.419 | 0.421 | 0.427 | 0.405 |
+
+### Primary comparisons
+
+The four comparisons in `PRIMARY`, fixed before test scoring. Holm adjusts
+over all 20 rows.
+
+| comparison | group | Δrpa | Δifa | ΔF1 | 95% CI | p | Holm p |
+|---|---|---|---|---|---|---|---|
+| DeepFilterNet3 front end for live reim: dfn3+reim-live-gate vs reim-live-gate | clean | +0.002 | - | +0.004 | [+0.001, +0.008] | 0.0264 | 0.2111 |
+| DeepFilterNet3 front end for live reim: dfn3+reim-live-gate vs reim-live-gate | noise | +0.316 | - | +0.235 | [+0.178, +0.292] | 0.0000 | 0.0000 |
+| DeepFilterNet3 front end for live reim: dfn3+reim-live-gate vs reim-live-gate | talker | +0.052 | -0.177 | +0.064 | [+0.029, +0.100] | 0.0022 | 0.0236 |
+| DeepFilterNet3 front end for live reim: dfn3+reim-live-gate vs reim-live-gate | ahead | +0.051 | -0.095 | +0.050 | [+0.027, +0.074] | 0.0007 | 0.0085 |
+| DeepFilterNet3 front end for live reim: dfn3+reim-live-gate vs reim-live-gate | babble | +0.113 | -0.061 | +0.094 | [+0.055, +0.134] | 0.0003 | 0.0040 |
+| causal clearest-voice lock: dfn3+reim-live-gate+lock vs dfn3+reim-live-gate | clean | -0.028 | - | -0.006 | [-0.017, +0.006] | 0.2851 | 1.0000 |
+| causal clearest-voice lock: dfn3+reim-live-gate+lock vs dfn3+reim-live-gate | noise | -0.009 | - | -0.000 | [-0.005, +0.004] | 0.9248 | 1.0000 |
+| causal clearest-voice lock: dfn3+reim-live-gate+lock vs dfn3+reim-live-gate | talker | -0.015 | -0.100 | +0.010 | [+0.005, +0.014] | 0.0012 | 0.0148 |
+| causal clearest-voice lock: dfn3+reim-live-gate+lock vs dfn3+reim-live-gate | ahead | -0.008 | -0.054 | +0.012 | [+0.008, +0.015] | 0.0000 | 0.0001 |
+| causal clearest-voice lock: dfn3+reim-live-gate+lock vs dfn3+reim-live-gate | babble | -0.002 | -0.013 | +0.003 | [+0.002, +0.004] | 0.0001 | 0.0016 |
+| offline lock over causal lock: dfn3+reim-live-gate+lock-offline vs dfn3+reim-live-gate+lock | clean | -0.012 | - | -0.007 | [-0.015, +0.001] | 0.0738 | 0.5165 |
+| offline lock over causal lock: dfn3+reim-live-gate+lock-offline vs dfn3+reim-live-gate+lock | noise | -0.007 | - | +0.000 | [-0.004, +0.005] | 0.8786 | 1.0000 |
+| offline lock over causal lock: dfn3+reim-live-gate+lock-offline vs dfn3+reim-live-gate+lock | talker | -0.011 | -0.099 | +0.012 | [+0.003, +0.022] | 0.0172 | 0.1547 |
+| offline lock over causal lock: dfn3+reim-live-gate+lock-offline vs dfn3+reim-live-gate+lock | ahead | -0.015 | -0.212 | +0.050 | [+0.035, +0.064] | 0.0000 | 0.0002 |
+| offline lock over causal lock: dfn3+reim-live-gate+lock-offline vs dfn3+reim-live-gate+lock | babble | -0.013 | -0.083 | +0.024 | [+0.014, +0.034] | 0.0002 | 0.0033 |
+| SwiftF0 over the best live reim chain: swiftf0 vs dfn3+reim-live-gate | clean | +0.074 | - | +0.051 | [+0.023, +0.079] | 0.0021 | 0.0236 |
+| SwiftF0 over the best live reim chain: swiftf0 vs dfn3+reim-live-gate | noise | +0.026 | - | +0.009 | [-0.025, +0.043] | 0.5792 | 1.0000 |
+| SwiftF0 over the best live reim chain: swiftf0 vs dfn3+reim-live-gate | talker | +0.072 | +0.336 | -0.017 | [-0.049, +0.016] | 0.2822 | 1.0000 |
+| SwiftF0 over the best live reim chain: swiftf0 vs dfn3+reim-live-gate | ahead | +0.072 | +0.225 | -0.014 | [-0.051, +0.023] | 0.4218 | 1.0000 |
+| SwiftF0 over the best live reim chain: swiftf0 vs dfn3+reim-live-gate | babble | +0.070 | +0.393 | -0.068 | [-0.094, -0.043] | 0.0001 | 0.0016 |
+
+### Dependence on the reference offset
+
+`--ref-shift-ms` at -5, +2 and +5 ms leaves every row of the first three
+comparisons within 0.011 F1 of the table above, with the same Holm verdict at
+p < 0.05. The SwiftF0 rows depend on the offset: the clean delta is +0.051 at
+0 ms, +0.050 at +2 ms and +0.014 at +5 ms (Holm p 1.0). The babble delta stays
+between -0.063 and -0.069 with Holm p below 0.005. `results/test/shift*ms/`
+holds those scores.
+
+### Findings
+
+- DeepFilterNet3 before reim-live-gate removes most of the noise loss. F1 at
+  noise_snr0 rises from 0.321 to 0.724, and the clean F1 does not drop. It
+  also helps with other talkers: +0.050 to +0.094 F1 per group, with higher
+  `rpa` and lower `ifa`.
+- RNNoise and the two-pass Wiener filter help less: at noise_snr0 they raise
+  reim-live from 0.303 to 0.493 and 0.449.
+- SwiftF0 alone handles noise as well as the DeepFilterNet3 chain, and it
+  has the highest `rpa` in 7 of 10 conditions (dfn3+reim-live is higher at
+  noise_snr5, noise_snr0 and babble_sir5). It also reports the interferer
+  most often: `ifa` is 0.22 to 0.39 higher than the DeepFilterNet3 chain, and
+  its babble F1 is 0.068 lower.
+- The causal clearest-voice lock gives +0.010 to +0.012 F1 with two talkers,
+  and +0.003 in babble. It lowers `rpa` in every group (0.002 to 0.028), so
+  the gain comes from silence while an interferer speaks alone, not from
+  better target pitch.
+- The offline lock adds +0.050 F1 over the causal lock when the interferer
+  speaks first, and +0.024 in babble, again through lower `ifa`. Whole-file
+  analysis can reject an early voice that a live lock must follow.
+- No method tracks the target well while both voices speak: the best
+  `rpa` at talker_sir5 is 0.706 (SwiftF0) against 0.807 on clean speech.
+
+### Verification record
+
+- A verifier rebuilt the scorer from this README alone. Twice it matched
+  every per-clip metric, every summary statistic and every primary row
+  exactly (largest difference 0.0).
+- A verifier rendered the benchmark on four Python/NumPy/libsndfile stacks,
+  one of them x86_64. All fingerprints matched, and its own reader confirmed
+  the levels, the layouts and the reference times.
+- Two adversarial audits found the target-first and tail biases, the
+  unscored interferer-first region, the 0 dB order problem, the microphone
+  delay and the statistics problems; each fix is a commit on this branch.
