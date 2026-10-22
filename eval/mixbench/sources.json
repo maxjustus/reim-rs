@@ -1,0 +1,218 @@
+{
+ "datasets": {
+  "ptdb": {
+   "title": "PTDB-TUG: Pitch Tracking Database from Graz University of Technology",
+   "official": "https://www.spsc.tugraz.at/databases-and-tools/ptdb-tug-pitch-tracking-database-from-graz-university-of-technology.html",
+   "mirror": "https://huggingface.co/datasets/gilkeyio/ptdb-tug (revision 0a3064cbbd1d88a0990f6411784142e66adc10ce)",
+   "license": "ODbL 1.0 (database), DbCL 1.0 (contents)",
+   "citation": "Pirker, Wohlmayr, Petrik, Pernkopf. A Pitch Tracking Corpus with Evaluation on Multipitch Tracking Scenario. Interspeech 2011."
+  },
+  "demand": {
+   "title": "DEMAND: Diverse Environments Multichannel Acoustic Noise Database",
+   "official": "https://zenodo.org/records/1227121",
+   "doi": "10.5281/zenodo.1227121",
+   "license": "Zenodo metadata: CC BY 4.0; description text: CC BY-SA 3.0",
+   "citation": "Thiemann, Ito, Vincent. DEMAND: a collection of multi-channel recordings of acoustic noise in diverse environments. Zenodo, 2013."
+  }
+ },
+ "files": [
+  {
+   "name": "ptdb/train-00000-of-00015.parquet",
+   "url": "https://huggingface.co/datasets/gilkeyio/ptdb-tug/resolve/0a3064cbbd1d88a0990f6411784142e66adc10ce/data/train-00000-of-00015.parquet",
+   "size": 410728164,
+   "sha256": "c9ab6e27a99a1e425c4745a0e451582f1e870c2273bf733d7914052ed17fd5b4"
+  },
+  {
+   "name": "ptdb/train-00001-of-00015.parquet",
+   "url": "https://huggingface.co/datasets/gilkeyio/ptdb-tug/resolve/0a3064cbbd1d88a0990f6411784142e66adc10ce/data/train-00001-of-00015.parquet",
+   "size": 441681773,
+   "sha256": "8ba3caed2d7ca8f1091386659dee0b7cd41632f46d4f3a9d65642ed6217dfe94"
+  },
+  {
+   "name": "ptdb/train-00002-of-00015.parquet",
+   "url": "https://huggingface.co/datasets/gilkeyio/ptdb-tug/resolve/0a3064cbbd1d88a0990f6411784142e66adc10ce/data/train-00002-of-00015.parquet",
+   "size": 411666977,
+   "sha256": "35956b65fa6be73ad0b87a24ddbe94a313809521e1fae7dbc6505d24e82abf7d"
+  },
+  {
+   "name": "ptdb/train-00003-of-00015.parquet",
+   "url": "https://huggingface.co/datasets/gilkeyio/ptdb-tug/resolve/0a3064cbbd1d88a0990f6411784142e66adc10ce/data/train-00003-of-00015.parquet",
+   "size": 409174375,
+   "sha256": "f40e7e38e7bb6c7dd18e3267b5f3e2ee83f9d6db82b20bd4ee8efe5418f3bcc2"
+  },
+  {
+   "name": "ptdb/train-00004-of-00015.parquet",
+   "url": "https://huggingface.co/datasets/gilkeyio/ptdb-tug/resolve/0a3064cbbd1d88a0990f6411784142e66adc10ce/data/train-00004-of-00015.parquet",
+   "size": 362498866,
+   "sha256": "9f1ac3292945dec8a099a0d5c7f15f9b9ec2762fd65c46e525198747926a58bf"
+  },
+  {
+   "name": "ptdb/train-00005-of-00015.parquet",
+   "url": "https://huggingface.co/datasets/gilkeyio/ptdb-tug/resolve/0a3064cbbd1d88a0990f6411784142e66adc10ce/data/train-00005-of-00015.parquet",
+   "size": 363257136,
+   "sha256": "96b6aa27fcbfd5a74ee52fb79c6dfa20333d3bf2b15368612de4bf474bb03fb7"
+  },
+  {
+   "name": "ptdb/train-00006-of-00015.parquet",
+   "url": "https://huggingface.co/datasets/gilkeyio/ptdb-tug/resolve/0a3064cbbd1d88a0990f6411784142e66adc10ce/data/train-00006-of-00015.parquet",
+   "size": 393002174,
+   "sha256": "bdd1fe9b06e3680b4d7b9441b3bddb9fa955e7b6265c0a6c9990fc942cbcc114"
+  },
+  {
+   "name": "ptdb/train-00007-of-00015.parquet",
+   "url": "https://huggingface.co/datasets/gilkeyio/ptdb-tug/resolve/0a3064cbbd1d88a0990f6411784142e66adc10ce/data/train-00007-of-00015.parquet",
+   "size": 381285311,
+   "sha256": "1c22ffbd056a5effd42c53902581d01701c865fbf83769c9cc1420761881245b"
+  },
+  {
+   "name": "ptdb/train-00008-of-00015.parquet",
+   "url": "https://huggingface.co/datasets/gilkeyio/ptdb-tug/resolve/0a3064cbbd1d88a0990f6411784142e66adc10ce/data/train-00008-of-00015.parquet",
+   "size": 378514654,
+   "sha256": "ee565829352fc75b9deab895d128ccc46b548d93f59dd679733950bd2f2b495d"
+  },
+  {
+   "name": "ptdb/train-00009-of-00015.parquet",
+   "url": "https://huggingface.co/datasets/gilkeyio/ptdb-tug/resolve/0a3064cbbd1d88a0990f6411784142e66adc10ce/data/train-00009-of-00015.parquet",
+   "size": 420419350,
+   "sha256": "4b65be9f991c92314cea598d67755210597fefd67bac409bd297335c8a969a7c"
+  },
+  {
+   "name": "ptdb/train-00010-of-00015.parquet",
+   "url": "https://huggingface.co/datasets/gilkeyio/ptdb-tug/resolve/0a3064cbbd1d88a0990f6411784142e66adc10ce/data/train-00010-of-00015.parquet",
+   "size": 416160576,
+   "sha256": "344d79f587b3f5647305fe2b72f72b0b925da17b5b523690498418c8d7eb43dd"
+  },
+  {
+   "name": "ptdb/train-00011-of-00015.parquet",
+   "url": "https://huggingface.co/datasets/gilkeyio/ptdb-tug/resolve/0a3064cbbd1d88a0990f6411784142e66adc10ce/data/train-00011-of-00015.parquet",
+   "size": 426569544,
+   "sha256": "d0d0bd8b97b474ec3e92f80c315e8d8ef91a70309d78695313833088b5354000"
+  },
+  {
+   "name": "ptdb/train-00012-of-00015.parquet",
+   "url": "https://huggingface.co/datasets/gilkeyio/ptdb-tug/resolve/0a3064cbbd1d88a0990f6411784142e66adc10ce/data/train-00012-of-00015.parquet",
+   "size": 357088359,
+   "sha256": "fd76c67a8e7d65660e13ee9de2f930994bd0f049eb95f64eee9500351bdecb44"
+  },
+  {
+   "name": "ptdb/train-00013-of-00015.parquet",
+   "url": "https://huggingface.co/datasets/gilkeyio/ptdb-tug/resolve/0a3064cbbd1d88a0990f6411784142e66adc10ce/data/train-00013-of-00015.parquet",
+   "size": 344080828,
+   "sha256": "822ec9f80d6f404620fec88aaf08bcc3462dd71845147a0d1c7d476aa1953543"
+  },
+  {
+   "name": "ptdb/train-00014-of-00015.parquet",
+   "url": "https://huggingface.co/datasets/gilkeyio/ptdb-tug/resolve/0a3064cbbd1d88a0990f6411784142e66adc10ce/data/train-00014-of-00015.parquet",
+   "size": 370175166,
+   "sha256": "c2b331571dd20afbf9aae998d14d059e8ddea2797f8165f929454fe78a09981f"
+  },
+  {
+   "name": "demand/DKITCHEN_48k.zip",
+   "url": "https://zenodo.org/records/1227121/files/DKITCHEN_48k.zip",
+   "size": 336992458,
+   "md5": "b4d38241fbd50d8a17f8742ca6870c10"
+  },
+  {
+   "name": "demand/DLIVING_48k.zip",
+   "url": "https://zenodo.org/records/1227121/files/DLIVING_48k.zip",
+   "size": 253978613,
+   "md5": "6ea02bb944e7e5950274f9e7d5faab4b"
+  },
+  {
+   "name": "demand/DWASHING_48k.zip",
+   "url": "https://zenodo.org/records/1227121/files/DWASHING_48k.zip",
+   "size": 306101499,
+   "md5": "ecf765f12b8d3ada7ef0ec664b8f8d73"
+  },
+  {
+   "name": "demand/NFIELD_48k.zip",
+   "url": "https://zenodo.org/records/1227121/files/NFIELD_48k.zip",
+   "size": 270538724,
+   "md5": "937eab7d3f64cea99fa377238e84c185"
+  },
+  {
+   "name": "demand/NPARK_48k.zip",
+   "url": "https://zenodo.org/records/1227121/files/NPARK_48k.zip",
+   "size": 257645848,
+   "md5": "bb90ec754ac02eede51bf80675a78cfe"
+  },
+  {
+   "name": "demand/NRIVER_48k.zip",
+   "url": "https://zenodo.org/records/1227121/files/NRIVER_48k.zip",
+   "size": 284560347,
+   "md5": "112c7997f19ef8f1f952fb3e066f6e1f"
+  },
+  {
+   "name": "demand/OHALLWAY_48k.zip",
+   "url": "https://zenodo.org/records/1227121/files/OHALLWAY_48k.zip",
+   "size": 252905617,
+   "md5": "cb9227a75d2c1342de0b6548da4bbb1b"
+  },
+  {
+   "name": "demand/OMEETING_48k.zip",
+   "url": "https://zenodo.org/records/1227121/files/OMEETING_48k.zip",
+   "size": 253340198,
+   "md5": "eae4c54c0e441df8375a979c0e9828f6"
+  },
+  {
+   "name": "demand/OOFFICE_48k.zip",
+   "url": "https://zenodo.org/records/1227121/files/OOFFICE_48k.zip",
+   "size": 277643831,
+   "md5": "6f87edf8a6b03f17b3f693af1754aab4"
+  },
+  {
+   "name": "demand/PCAFETER_48k.zip",
+   "url": "https://zenodo.org/records/1227121/files/PCAFETER_48k.zip",
+   "size": 314117272,
+   "md5": "b7b8b10f41b747cd0fd3849db13cebd2"
+  },
+  {
+   "name": "demand/PRESTO_48k.zip",
+   "url": "https://zenodo.org/records/1227121/files/PRESTO_48k.zip",
+   "size": 327432202,
+   "md5": "6e9fef96d78e636029fd4c5929b9cece"
+  },
+  {
+   "name": "demand/PSTATION_48k.zip",
+   "url": "https://zenodo.org/records/1227121/files/PSTATION_48k.zip",
+   "size": 348948834,
+   "md5": "b40f603504997111b0bf7e2ce78e0594"
+  },
+  {
+   "name": "demand/SCAFE_48k.zip",
+   "url": "https://zenodo.org/records/1227121/files/SCAFE_48k.zip",
+   "size": 325884186,
+   "md5": "1a4ee387f1900f4b15ba219481c76556"
+  },
+  {
+   "name": "demand/SPSQUARE_48k.zip",
+   "url": "https://zenodo.org/records/1227121/files/SPSQUARE_48k.zip",
+   "size": 320482248,
+   "md5": "f5fbdd5c1e03ab8c44c32ad96261ca26"
+  },
+  {
+   "name": "demand/STRAFFIC_48k.zip",
+   "url": "https://zenodo.org/records/1227121/files/STRAFFIC_48k.zip",
+   "size": 348263839,
+   "md5": "ffbcdebb7e1c39d3d5b7920b0594e20b"
+  },
+  {
+   "name": "demand/TBUS_48k.zip",
+   "url": "https://zenodo.org/records/1227121/files/TBUS_48k.zip",
+   "size": 376202003,
+   "md5": "f7d6657314d90c6f270955eaed411ddc"
+  },
+  {
+   "name": "demand/TCAR_48k.zip",
+   "url": "https://zenodo.org/records/1227121/files/TCAR_48k.zip",
+   "size": 373520251,
+   "md5": "8550f03e8356d8054ae845e8b4b6c773"
+  },
+  {
+   "name": "demand/TMETRO_48k.zip",
+   "url": "https://zenodo.org/records/1227121/files/TMETRO_48k.zip",
+   "size": 367513573,
+   "md5": "00d895020233f94348aafce7140d671f"
+  }
+ ]
+}
