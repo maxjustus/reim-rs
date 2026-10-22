@@ -365,7 +365,8 @@ holds those scores.
 - DeepFilterNet3 before reim-live-gate removes most of the noise loss. F1 at
   noise_snr0 rises from 0.321 to 0.724, and the clean F1 does not drop. It
   also helps with other talkers: +0.050 to +0.094 F1 per group, with higher
-  `rpa` and lower `ifa`.
+  `rpa` and lower `ifa`. On sung input it also removes voice, see
+  "DeepFilterNet3 on sung mm1-rs recordings".
 - RNNoise and the two-pass Wiener filter help less: at noise_snr0 they raise
   reim-live from 0.303 to 0.493 and 0.449.
 - SwiftF0 alone handles noise as well as the DeepFilterNet3 chain, and it
@@ -382,6 +383,75 @@ holds those scores.
   analysis can reject an early voice that a live lock must follow.
 - No method tracks the target well while both voices speak: the best
   `rpa` at talker_sir5 is 0.706 (SwiftF0) against 0.807 on clean speech.
+
+### DeepFilterNet3 on sung mm1-rs recordings (abandoned)
+
+The DeepFilterNet3 finding led to a trial in mm1-rs. The trial put
+DeepFilterNet3 ahead of the offline analysis of each recorded clip, with a
+toggle for each clip. We abandoned it before a commit, because DeepFilterNet3
+removes sung voice.
+
+The input is the 60 mm1-rs recordings in `data/vocal_examples/*/audio.wav`,
+48 kHz mono float32, 61.1 s in total. These files are not in git, and they
+have no pitch references. The commands are:
+
+```
+deep-filter-0.5.6 -D [-a <dB>] -o <out> <in>/*.wav
+reim-8c713e7 f0 <wav> 65 800 2048
+```
+
+`-a` is the deep-filter attenuation limit in dB. `reim-8c713e7` has SHA-256
+`4eb88025a9bfa0221357c558d25a777a5148ccbc63879b3c55f81d8cd49d0633`, the same
+`reim` binary as the test runs. Its arguments match the mm1-rs offline
+analysis: 65 to 800 Hz and a 2048-point window.
+
+The metric is the number of frames that reim reports as voiced, summed over
+the 60 files. Without pitch references, this count measures lost voice, not
+accuracy. A lower count means that DeepFilterNet3 removed voice.
+
+| input | voiced frames | clips that lose more than half of their voiced frames |
+| --- | --- | --- |
+| raw | 4579 | - |
+| deep-filter `-D` (the scored configuration) | 3620 | 8 |
+| deep-filter `-D -a 12` | 4595 | 0 |
+| deep-filter `-D -a 6` | 4518 | 0 |
+
+The last column counts only clips with at least 20 voiced frames in the raw
+analysis.
+
+- At full strength, DeepFilterNet3 removes voice but does not move pitch. In
+  frames that both tracks report as voiced, f0 agrees within 50 cents. The
+  median clip agrees in 100% of those frames.
+- The worst clip, `1783624111539_unlabeled_overdub`, goes from 123 voiced
+  frames to 0, and its level drops 36 dB.
+- A steady synthetic vowel with no noise keeps 3% of its power (-15 dB). The
+  vowel is `synth_sung_vowel` from mm1-rs `src/test_utils.rs`: 180 Hz with
+  1% vibrato at 5.5 Hz, formants AH, tilt -9 dB per octave, amplitude 0.1,
+  1 s. The model
+  treats a steady harmonic tone as noise. Read speech does not show this, so
+  mixbench cannot detect it.
+
+We measured the cost with the deep-filter binary on an Apple M4 Max. The
+rate is the time difference between a 300 s run and a 1 s run, divided by
+299 s. Each run used one thread.
+
+| model | CPU seconds per audio second | added latency |
+| --- | --- | --- |
+| DeepFilterNet3 | 0.031 | 30-40 ms |
+| DeepFilterNet3 low latency (`DeepFilterNet3_ll_onnx.tar.gz`) | 0.073 | 10-20 ms |
+| reim f0, for comparison | 0.042 | - |
+
+The default model delays its output by 1440 samples (STFT and a 2-frame
+lookahead). The low-latency model has no lookahead and delays by 480
+samples. Both models then wait up to one 480-sample hop for a full input
+frame. In Rust, libDF 0.5.6 is not on crates.io, where the newest release is
+0.2.5. It needs a git dependency, tract 0.19, and a 7.98 MB embedded model.
+
+Decision: do not use DeepFilterNet3 at full strength on sung input. The 12 dB
+limit keeps the voice, but mixbench did not score it, so its noise gain is
+unknown. To revisit, first score `deep-filter -D -a 12` ahead of
+reim-live-gate on dev. If the noise gain holds, repeat the recording check
+above.
 
 ### Verification record
 
